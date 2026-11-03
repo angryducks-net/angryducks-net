@@ -126,3 +126,16 @@ This is the running log of how the AngryDucks community and forum are designed, 
   5. **Banning hides the member's posts.** Today a ban only blocks login; posts stay up and must be deleted one by one.
   6. **A report button**, and later AI-assisted spam flagging alongside AI tagging.
 - **Status:** Deferred until we plan public registration. Revisit together with D3 and D4.
+
+---
+
+## 2026-11-03 · Home page
+
+### D22. angryducks.net is a landing page with the manifesto
+- **Decision:** `angryducks.net` shows a landing page: the logo, a button into the forum, and the full manifesto. Every other path on that domain redirects to the forum. The forum Worker serves it, so one deploy updates both.
+- **Status:** Active
+
+### D23. The manifesto has one source
+- **Decision:** `MANIFESTO.md` at the repository root is the only place the manifesto is edited. A script copies it into the README and the landing page, deploys run that script first, and a unit test fails if any copy is out of date.
+- **Why:** The manifesto appears in several places and will keep evolving. Editing it in one place means the copies never drift.
+- **Status:** Active

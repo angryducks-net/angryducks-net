@@ -6,6 +6,8 @@
     "db:local": "wrangler d1 migrations apply angryducks-forum --local",
     "db:remote": "wrangler d1 migrations apply angryducks-forum --remote",
     "dev": "wrangler dev",
+    "sync": "node scripts/sync-manifesto.mjs",
+    "predeploy": "node scripts/sync-manifesto.mjs",
     "deploy": "wrangler deploy",
     "test:unit": "node --test test/unit.test.mjs",
     "test:smoke": "node test/smoke.mjs"

@@ -6,6 +6,8 @@ import {
   hashPassword, LOCK_AFTER, LOCK_MS, randomCode, randomHex, readCookie, SESSION_MS, sessionCookie, sha256Hex, verifyPassword,
 } from './auth.js';
 import * as V from './views.js';
+import { renderMarkdown } from './markdown.js';
+import { MANIFESTO_MD } from './manifesto.generated.js';
 
 const MAX_PRODUCTS = 10;
 // Anti-flood defaults; override with Worker vars RATE_LIMIT_PER_MIN / DAILY_POST_LIMIT.
@@ -14,6 +16,13 @@ const DAILY_LIMIT = 30; // posts per 24 hours per user
 const UPLOAD_MAX_BYTES = 100 * 1024;
 const LIST_LIMIT = 50;
 const SCAN_LIMIT = 500; // newest topics considered for hot ranking
+
+// angryducks.net serves the landing page; every other host is the forum.
+// Override with Worker vars HOME_HOSTS / FORUM_ORIGIN (used for local testing).
+const DEFAULT_HOME_HOSTS = 'angryducks.net,www.angryducks.net';
+const DEFAULT_FORUM_ORIGIN = 'https://community.angryducks.net';
+const REPO_URL = 'https://github.com/angryducks-net/angryducks-net';
+const MANIFESTO_HTML = renderMarkdown(MANIFESTO_MD);
 
 const SECURITY_HEADERS = {
   'Content-Security-Policy':
@@ -84,8 +93,22 @@ function route(method, pattern, handler, { open = false, admin = false } = {}) {
   routes.push({ method, re: new RegExp(`^${pattern}$`), handler, open, admin });
 }
 
+function handleHome(request, env, url) {
+  const forumOrigin = env.FORUM_ORIGIN || DEFAULT_FORUM_ORIGIN;
+  if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405 });
+  if (url.pathname === '/favicon.svg') {
+    return new Response(V.FAVICON_SVG, { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' } });
+  }
+  if (url.pathname !== '/') return redirect(forumOrigin + url.pathname + url.search);
+  return html(V.homePage({ manifestoHtml: MANIFESTO_HTML, forumUrl: forumOrigin, repoUrl: REPO_URL }), 200, {
+    'Cache-Control': 'public, max-age=300',
+  });
+}
+
 async function handle(request, env) {
   const url = new URL(request.url);
+  const homeHosts = (env.HOME_HOSTS || DEFAULT_HOME_HOSTS).split(',').map((h) => h.trim());
+  if (homeHosts.includes(url.hostname)) return handleHome(request, env, url);
   const method = request.method === 'HEAD' ? 'GET' : request.method;
   if (method === 'POST' && !sameOrigin(request, url)) {
     return new Response('Cross-origin request blocked.', { status: 403 });

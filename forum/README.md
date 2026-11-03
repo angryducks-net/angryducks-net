@@ -10,6 +10,8 @@
 | `src/views.js` | 页面模板和样式 |
 | `src/util.js` | 纯函数：转义、tag 规范化、语言识别、热度公式、代码块识别、上传截断 |
 | `src/markdown.js` | Markdown 渲染，禁止原始 HTML、代码块和图片 |
+| `src/manifesto.generated.js` | 首页用的宣言文本，由脚本从根目录 `MANIFESTO.md` 生成，不要手改 |
+| `scripts/sync-manifesto.mjs` | 把 `MANIFESTO.md` 同步到 README 和首页 |
 | `src/auth.js` | 密码哈希（PBKDF2）、会话令牌 |
 | `migrations/0001_init.sql` | 数据库表结构 |
 | `test/unit.test.mjs` | 纯函数单元测试 |
@@ -55,6 +57,24 @@ npx wrangler dev --persist-to /tmp/ad-limits --var DAILY_POST_LIMIT:2 --var RATE
 
 ```bash
 node test/limits.mjs
+```
+
+## 首页和宣言
+
+同一个 Worker 按域名分流：`angryducks.net` 显示首页（论坛入口加宣言），其他域名都是论坛。
+
+**宣言只改根目录的 `MANIFESTO.md` 一处。** 改完运行：
+
+```bash
+npm run sync
+```
+
+它会更新根目录 README 里的宣言段落和首页用的文本。`npm run deploy` 部署前也会自动跑一遍。忘了同步的话，`npm run test:unit` 会失败。
+
+本地预览首页（把所有请求当作 angryducks.net）：
+
+```bash
+npx wrangler dev --local-upstream angryducks.net
 ```
 
 ## 第一次部署到 community.angryducks.net

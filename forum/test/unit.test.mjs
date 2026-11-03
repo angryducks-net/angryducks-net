@@ -121,3 +121,23 @@ test('prepares uploads: long files are cut and leave room for the link', () => {
   assert.ok(charLen(r.body) <= BODY_MAX - LINK_RESERVE + 20);
   assert.ok(charLen(r.body + 'https://example.com/a-fairly-long-path/to/the/full-document') <= BODY_MAX);
 });
+
+import { readFileSync } from 'node:fs';
+import { PATHS, readSource, readmeBlock, moduleSource } from '../scripts/sync-manifesto.mjs';
+import { homePage } from '../src/views.js';
+import { MANIFESTO_MD } from '../src/manifesto.generated.js';
+
+test('manifesto: README and home page copies match MANIFESTO.md (run `npm run sync` if this fails)', () => {
+  const md = readSource();
+  assert.ok(readFileSync(PATHS.readme, 'utf8').includes(readmeBlock(md)), 'README.md is out of date');
+  assert.equal(readFileSync(PATHS.module, 'utf8'), moduleSource(md), 'manifesto.generated.js is out of date');
+  assert.equal(MANIFESTO_MD, md);
+});
+
+test('home page: forum link, manifesto, no scripts', () => {
+  const html = homePage({ manifestoHtml: renderMarkdown(MANIFESTO_MD), forumUrl: 'https://community.angryducks.net', repoUrl: 'https://github.com/x/y' });
+  assert.match(html, /<a class="cta" href="https:\/\/community\.angryducks\.net">Enter the forum/);
+  assert.match(html, /<h1>ANGRY DUCKS MANIFESTO<\/h1>/);
+  assert.match(html, /The Four Ground Rules/);
+  assert.doesNotMatch(html, /<script/i);
+});

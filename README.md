@@ -11,8 +11,8 @@ The community forum for builders who ship with AI, and the open source code behi
 
 ---
 
+<!-- MANIFESTO:START: generated from MANIFESTO.md by forum/scripts/sync-manifesto.mjs, edit that file instead -->
 ## ANGRY DUCKS MANIFESTO
-
 > **"No more quacking. Just launching."**
 
 Welcome to **Angry Ducks**.
@@ -60,6 +60,7 @@ Speed does not mean blind gambling. When you ship, be transparent about what wor
 ---
 
 **Stop quacking. Start building. Let's launch.**
+<!-- MANIFESTO:END -->
 
 ---
 

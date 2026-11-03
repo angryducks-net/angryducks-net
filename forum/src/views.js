@@ -70,6 +70,19 @@ code{background:#f1f1f3;padding:1px 5px;border-radius:4px}
 .md hr{border:0;border-top:1px solid var(--line);margin:14px 0}
 .table-wrap{overflow-x:auto;margin:0 0 10px}
 .table-wrap table{width:auto;min-width:50%}
+.home-hero{text-align:center;padding:28px 0 8px}
+.home-hero .logo{width:96px;height:96px}
+.home-hero h1{font-size:34px;margin:10px 0 4px}
+.home-hero p{color:var(--muted);margin:0 0 18px}
+.cta{display:inline-block;background:var(--yellow);color:var(--ink);font-weight:700;text-decoration:none;border-radius:10px;padding:12px 22px}
+.cta:hover{background:var(--orange)}
+.manifesto{border-top:1px solid var(--line);margin-top:28px;padding-top:8px;font-size:17px}
+.manifesto h1{font-size:26px;margin:24px 0 8px}
+.manifesto h2{font-size:21px;margin:28px 0 8px}
+.manifesto h3{font-size:18px;margin:22px 0 6px}
+.manifesto h4{font-size:17px;margin:18px 0 6px}
+.manifesto p,.manifesto ul{margin:0 0 12px}
+footer{max-width:820px;margin:0 auto;padding:24px 16px 40px;border-top:1px solid var(--line);font-size:14px;color:var(--muted)}
 .rules{background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px;color:#45454d}
 .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 input[type=file]{padding:6px;width:auto;max-width:100%}
@@ -305,4 +318,32 @@ ${u.id === me.id ? '' : u.banned_at ? `<form class="inline" method="post" action
   )
   .join('')}
 </table>`;
+}
+
+// Landing page for angryducks.net: forum link plus the manifesto (rendered from MANIFESTO.md).
+export function homePage({ manifestoHtml, forumUrl, repoUrl }) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AngryDucks · No more quacking. Just launching.</title>
+<meta name="description" content="AngryDucks is a community for builders who ship with AI.">
+<link rel="icon" href="/favicon.svg?v=2" type="image/svg+xml">
+<style>${CSS}</style>
+</head>
+<body>
+<header><div class="bar"><a class="brand" href="/">${LOGO}<span translate="no">AngryDucks</span></a><nav><a href="${esc(forumUrl)}">Forum</a><a href="${esc(repoUrl)}">GitHub</a></nav></div></header>
+<main>
+  <section class="home-hero">
+    <svg class="logo" viewBox="56 58 460 460" aria-hidden="true">${HEAD}</svg>
+    <h1 translate="no">AngryDucks</h1>
+    <p>A community for builders who ship with AI.</p>
+    <a class="cta" href="${esc(forumUrl)}">Enter the forum →</a>
+  </section>
+  <article class="md manifesto">${manifestoHtml}</article>
+</main>
+<footer>Open source under the MIT License · <a href="${esc(repoUrl)}">Code and design decisions on GitHub</a></footer>
+</body>
+</html>`;
 }
