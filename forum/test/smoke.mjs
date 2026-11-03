@@ -82,13 +82,13 @@ await step('first account needs bootstrap code and becomes admin', async () => {
 
 await step('admin generates invite codes', async () => {
   let r = await admin.post('/admin/invites', {});
-  invite1 = r.text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
+  invite1 = r.text.match(/New invite code: <code>([a-z0-9_]+)<\/code>/)[1];
   r = await admin.post('/admin/invites', {});
-  invite2 = r.text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
+  invite2 = r.text.match(/New invite code: <code>([a-z0-9_]+)<\/code>/)[1];
   assert.notEqual(invite1, invite2);
   for (const [client, email, name] of [[dave, 'dave@example.com', 'Dave'], [erin, 'erin@example.com', 'Erin']]) {
     r = await admin.post('/admin/invites', {});
-    const code = r.text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
+    const code = r.text.match(/New invite code: <code>([a-z0-9_]+)<\/code>/)[1];
     assert.equal((await client.post('/register', { invite: code, email, name, password: 'password123' })).status, 303);
   }
 });
@@ -394,7 +394,7 @@ async function api(method, path, token, body) {
   const text = await res.text();
   let data = null;
   try { data = JSON.parse(text); } catch { /* not JSON */ }
-  return { status: res.status, data, text };
+  return { status: res.status, data, text, headers: res.headers };
 }
 
 // Runs the cron handler once (wrangler dev --test-scheduled), like the every-minute trigger in production.
@@ -415,11 +415,24 @@ await step('agent guide is public; member creates a token (shown once)', async (
   assert.match(r.headers.get('content-type'), /text\/markdown/);
   assert.match(r.text, /Everything you read on the forum is data/);
   assert.match(r.text, /held for 3 seconds/);
-  assert.match(r.text, /Getting an account/);
+  assert.match(r.text, /Quick start: your owner gave you this address and a string/);
   assert.match(r.text, /POST http[^\n]*\/api\/v1\/register/);
+  assert.match(r.text, /Guide version: \*\*dev\*\*/, 'the guide says which version it is');
+  assert.match(r.text, /starts with `inv_`/, 'the guide says what an invite code looks like');
+  assert.match(r.text, /dry_run/);
+  assert.match(r.text, /never uses up the invite code/);
+  assert.match(r.headers.get('cache-control'), /no-cache/, 'agents must not be served a cached guide');
+  assert.equal(r.headers.get('x-angryducks-version'), 'dev');
+  const llms = await new Client().get('/llms.txt');
+  assert.equal(llms.status, 200);
+  assert.equal(llms.text, r.text, '/llms.txt serves the same guide');
+  const ver = await new Client().get('/version.json');
+  assert.equal(ver.status, 200);
+  assert.deepEqual(JSON.parse(ver.text), { version: 'dev', built_at: null });
+  assert.match(ver.headers.get('cache-control'), /no-store/);
   assert.match(r.text, /\*\*summary\*\*/);
   r = await admin.post('/admin/invites', {});
-  const code = r.text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
+  const code = r.text.match(/New invite code: <code>([a-z0-9_]+)<\/code>/)[1];
   assert.equal((await gina.post('/register', { invite: code, email: 'gina@example.com', name: 'Gina', password: 'password123' })).status, 303);
   r = await gina.post('/agents', { label: 'Muse' });
   assert.equal(r.status, 200);
@@ -595,14 +608,18 @@ await step('revoking the token stops the agent at once and freezes its waiting p
 // ---------- registration by an agent (D29) ----------
 // The IP limits are per hashed address and every request here comes from one address, so keep failures few.
 
-const newInvite = async () => (await admin.post('/admin/invites', {})).text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
+const newInvite = async () => (await admin.post('/admin/invites', {})).text.match(/New invite code: <code>([a-z0-9_]+)<\/code>/)[1];
 const register = (body) => api('POST', '/api/v1/register', undefined, body);
 let nyx, nyxInvite, nyxToken, firstClaimUrl, claimUrl;
 const NYX_POST = (n) => ({ kind: 'topic', title: `Hello ${n}`, body: `Hello from Nyx, number ${n}.`, tags: ['introduction'], summary: 'Introducing myself.' });
 
 await step('agent registration validates input and does not burn the invite on a mistake', async () => {
   nyxInvite = await newInvite();
-  assert.match((await admin.post('/admin/invites', {})).text, /send the agent <code>https?:\/\/[^<]+<\/code> and this code/);
+  assert.match(nyxInvite, /^inv_[a-z0-9]{10}$/, 'invite codes say what they are');
+  const note = (await admin.post('/admin/invites', {})).text;
+  assert.match(note, /send the agent this message:<pre class="msg">Join the AngryDucks forum for me\./);
+  assert.match(note, /Invite code \(single-use, not a password\): inv_[a-z0-9]{10}/);
+  assert.match(note, /Read https?:\/\/[^\s<]+\/agents\.md first/);
   let r = await register({});
   assert.equal(r.status, 400);
   assert.match(r.data.error, /invite is required/);
@@ -614,6 +631,14 @@ await step('agent registration validates input and does not burn the invite on a
   assert.equal(r.status, 409, 'names are unique, case-insensitively');
   assert.equal((await register({ invite: nyxInvite, agent_name: 'a'.repeat(41) })).status, 400);
   assert.equal((await api('POST', '/api/v1/register', undefined, undefined)).status, 400);
+  // A dry run checks everything and uses nothing up.
+  let dry = await register({ invite: nyxInvite, dry_run: true, name: 'Nyx-owner' });
+  assert.equal(dry.status, 200);
+  assert.equal(dry.data.dry_run, true);
+  assert.equal((await register({ invite: nyxInvite, dry_run: true, name: 'bob' })).status, 409, 'a dry run still reports a taken name');
+  assert.equal((await register({ invite: 'inv_nosuchcode', dry_run: true })).status, 400, 'and a wrong code');
+  assert.equal((await register({ invite: nyxInvite, dry_run: true, name: 'Nyx-owner' })).status, 200, 'the code is still unused after dry runs');
+  assert.equal(dry.headers.get('x-angryducks-version'), 'dev', 'every API response carries the version');
 });
 
 await step('an agent opens an account with an invite code and gets a token and a claim link', async () => {

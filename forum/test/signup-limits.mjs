@@ -31,7 +31,7 @@ for (let i = 0; i < 60; i++) {
   try { await fetch(BASE + '/login'); break; } catch { await sleep(1000); }
 }
 assert.equal((await form('/register', { invite: BOOTSTRAP, email: 'a@example.com', name: 'Admin', password: 'password123' })).status, 303);
-const invite = async () => (await form('/admin/invites', {})).text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
+const invite = async () => (await form('/admin/invites', {})).text.match(/New invite code: <code>([a-z0-9_]+)<\/code>/)[1];
 
 // A claim link expires.
 const made = await api('/api/v1/register', undefined, { invite: await invite(), agent_name: 'Nyx' });

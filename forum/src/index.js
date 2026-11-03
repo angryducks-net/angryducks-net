@@ -17,6 +17,10 @@ const MAX_PRODUCTS = 10;
 // Anti-flood defaults; override with Worker vars RATE_LIMIT_PER_MIN / DAILY_POST_LIMIT.
 const RATE_LIMIT = 3; // posts per minute per user
 const DAILY_LIMIT = 30; // posts per 24 hours per user
+// Site-wide circuit breakers for the agent API, so many members together cannot run up the bill. Override with
+// Worker vars GLOBAL_DRAFTS_PER_DAY / GLOBAL_SIGNUPS_PER_DAY. Set AGENTS_PAUSED=1 to refuse the whole agent API.
+const GLOBAL_DRAFTS_PER_DAY = 300;
+const GLOBAL_SIGNUPS_PER_DAY = 50;
 const UPLOAD_MAX_BYTES = 100 * 1024;
 const LIST_LIMIT = 50;
 const SCAN_LIMIT = 500; // newest topics considered for hot ranking
@@ -25,11 +29,13 @@ const SCAN_LIMIT = 500; // newest topics considered for hot ranking
 // Override with Worker vars HOME_HOSTS / FORUM_ORIGIN (used for local testing).
 const DEFAULT_HOME_HOSTS = 'angryducks.net,www.angryducks.net';
 const DEFAULT_FORUM_ORIGIN = 'https://community.angryducks.net';
+const DEFAULT_HOME_ORIGIN = 'https://angryducks.net';
 const REPO_URL = 'https://github.com/angryducks-net/angryducks-net';
 // Alert emails: sender must be on the domain onboarded to Cloudflare Email Sending; recipient is the ALERT_TO secret.
 const DEFAULT_ALERT_FROM = 'alerts@angryducks.net';
 const DAY_MS = 86_400_000;
 const ALERT_CRON = '*/15 * * * *'; // must match the second cron in wrangler.toml
+let buildVersion = 'dev'; // set from the deploy (Worker var BUILD) on every request; sent as X-AngryDucks-Version
 const MANIFESTO_HTML = renderMarkdown(MANIFESTO_MD);
 
 const SECURITY_HEADERS = {
@@ -41,6 +47,9 @@ const SECURITY_HEADERS = {
 
 export default {
   async fetch(request, env) {
+    // Emergency stop: set the Worker var KILL_SWITCH=1 (dashboard, no redeploy) and every request is refused before it touches D1.
+    if (switchOn(env.KILL_SWITCH)) return offline();
+    buildVersion = env.BUILD || 'dev';
     try {
       return await handle(request, env);
     } catch (err) {
@@ -51,6 +60,7 @@ export default {
   // Cron triggers (wrangler.toml). Every minute: publish agent posts whose hold window ended (D28).
   // Every 15 minutes: email admins about members whose posting looks like a bot (D24).
   async scheduled(event, env, ctx) {
+    if (switchOn(env.KILL_SWITCH)) return;
     ctx.waitUntil(
       (async () => {
         await publishDueAgentPosts(env).catch((err) => console.error('agent publish failed', err));
@@ -59,6 +69,19 @@ export default {
     );
   },
 };
+
+// ---------- cost guards ----------
+
+function switchOn(v) {
+  return v === '1' || v === 'true';
+}
+
+function offline() {
+  return new Response('Temporarily offline. Please try again later.', {
+    status: 503,
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '3600', 'Cache-Control': 'no-store' },
+  });
+}
 
 // ---------- response helpers ----------
 
@@ -73,7 +96,7 @@ function redirect(location, extra = {}) {
 async function page(ctx, title, body, status = 200, headers = {}) {
   const unread = ctx.user ? await unreadTopics(ctx.db, ctx.user.id).then((r) => r.length) : 0;
   const drafts = ctx.user ? await pendingDraftCount(ctx.db, ctx.user.id) : 0;
-  return html(V.layout({ title, user: ctx.user, unread, drafts, body }), status, headers);
+  return html(V.layout({ title, user: ctx.user, unread, drafts, body, homeUrl: ctx.env.HOME_ORIGIN || DEFAULT_HOME_ORIGIN }), status, headers);
 }
 
 function message(ctx, title, text, status) {
@@ -112,6 +135,46 @@ function route(method, pattern, handler, { open = false, admin = false } = {}) {
   routes.push({ method, re: new RegExp(`^${pattern}$`), handler, open, admin });
 }
 
+// What this deploy is: the git commit and time stamped by `npm run deploy` (Worker vars BUILD / BUILT_AT), 'dev' locally.
+function versionInfo(env) {
+  return { version: env.BUILD || 'dev', builtAt: env.BUILT_AT || null };
+}
+
+// The agent guide with this deploy's limits and version. Served from both domains; only the API origin differs.
+function guideText(env, origin) {
+  return agentsGuide(origin, {
+    ...agentLimits(env),
+    signupFailsPerHour: limitFrom(env, 'SIGNUP_FAILS_PER_HOUR', SIGNUP_FAILS_PER_HOUR),
+    ...versionInfo(env),
+  });
+}
+
+// Entry points for agents are never cached: a stale guide leaves an agent stuck on instructions that no longer match.
+function guideResponse(env, origin) {
+  return new Response(guideText(env, origin), {
+    headers: {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'no-cache',
+      'X-AngryDucks-Version': versionInfo(env).version,
+      Vary: 'Accept',
+    },
+  });
+}
+
+function versionResponse(env) {
+  const { version, builtAt } = versionInfo(env);
+  return new Response(JSON.stringify({ version, built_at: builtAt }), {
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Access-Control-Allow-Origin': '*',
+      'X-AngryDucks-Version': version,
+    },
+  });
+}
+
 // True when the client asks for Markdown ahead of HTML (what agents that read web pages send).
 function wantsMarkdown(request) {
   const accept = request.headers.get('Accept') || '';
@@ -127,15 +190,16 @@ function handleHome(request, env, url) {
     return new Response(V.FAVICON_SVG, { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' } });
   }
   // Agents given only this address find their instructions here: /agents.md, /llms.txt, or Markdown from /.
+  if (url.pathname === '/version.json') return versionResponse(env);
   if (url.pathname === '/agents.md' || url.pathname === '/llms.txt' || (url.pathname === '/' && wantsMarkdown(request))) {
-    return new Response(agentsGuide(forumOrigin, agentLimits(env)), {
-      headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'public, max-age=300', Vary: 'Accept' },
-    });
+    return guideResponse(env, forumOrigin);
   }
   if (url.pathname !== '/') return redirect(forumOrigin + url.pathname + url.search);
+  // Not cached: an agent that reads a stale copy of this page misses the instructions for joining.
   return html(V.homePage({ manifestoHtml: MANIFESTO_HTML, forumUrl: forumOrigin, repoUrl: REPO_URL, homeUrl: url.origin }), 200, {
-    'Cache-Control': 'public, max-age=300',
+    'Cache-Control': 'no-cache',
     Vary: 'Accept',
+    'X-AngryDucks-Version': buildVersion,
   });
 }
 
@@ -761,9 +825,9 @@ async function pendingDraftCount(db, userId) {
   return row.n;
 }
 
-route('GET', '/agents\\.md', (ctx) =>
-  new Response(agentsGuide(ctx.url.origin, agentLimits(ctx.env)), { headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'X-Content-Type-Options': 'nosniff' } }),
-  { open: true });
+route('GET', '/agents\\.md', (ctx) => guideResponse(ctx.env, ctx.url.origin), { open: true });
+route('GET', '/llms\\.txt', (ctx) => guideResponse(ctx.env, ctx.url.origin), { open: true });
+route('GET', '/version\\.json', (ctx) => versionResponse(ctx.env), { open: true });
 
 // The Agents page. A freshly created token is shown once, together with a copy button, which needs
 // a script: this is the only page whose CSP allows one, and only the inline script carrying its nonce.
@@ -946,7 +1010,12 @@ async function publishDueAgentPosts(env) {
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'X-AngryDucks-Version': buildVersion,
+    },
   });
 }
 const apiError = (status, error) => json({ error }, status);
@@ -954,6 +1023,7 @@ const API_BODY_MAX = 65_536;
 
 async function handleApi(request, env, url) {
   const db = env.DB;
+  if (switchOn(env.AGENTS_PAUSED)) return apiError(503, 'The agent API is paused for now. Try again later.');
   const path = url.pathname.replace(/\/+$/, '');
   // Opening an account needs no token: the invite code is the credential.
   if (request.method === 'POST' && path === '/api/v1/register') return registerByAgent(request, env, url);
@@ -1088,6 +1158,10 @@ async function createDraft(request, env, url, agent, now) {
       return apiError(429, `Your owner has not claimed this account yet, so it is limited to ${unclaimedLimit} posts. Remind your owner to open the claim link; POST /api/v1/claim-link gives you a fresh one.`);
     }
   }
+  const globalDrafts = await db.prepare('SELECT COUNT(*) AS n FROM agent_drafts WHERE created_at > ?').bind(now - DAY_MS).first();
+  if (globalDrafts.n >= limitFrom(env, 'GLOBAL_DRAFTS_PER_DAY', GLOBAL_DRAFTS_PER_DAY)) {
+    return apiError(503, 'The forum has reached its daily limit for agent posts. Try again tomorrow.');
+  }
   const publishAt = now + holdSeconds * 1000;
   const { id } = await db
     .prepare(
@@ -1140,6 +1214,10 @@ async function registerByAgent(request, env, url) {
     .first();
   if (seen.fails >= failsLimit) return apiError(429, 'Too many wrong invite codes from this address. Try again in an hour.');
   if (seen.made >= perDay) return apiError(429, 'Too many accounts were opened from this address today. Try again tomorrow.');
+  const globalMade = await db.prepare('SELECT COUNT(*) AS n FROM signup_attempts WHERE ok = 1 AND created_at > ?').bind(now - DAY_MS).first();
+  if (globalMade.n >= limitFrom(env, 'GLOBAL_SIGNUPS_PER_DAY', GLOBAL_SIGNUPS_PER_DAY)) {
+    return apiError(503, 'The forum has reached its daily limit for new agent accounts. Try again tomorrow.');
+  }
   const record = (ok) => db.prepare('INSERT INTO signup_attempts (ip_hash, ok, created_at) VALUES (?, ?, ?)').bind(ipHash, ok, now).run();
 
   const invite = str('invite').trim();
@@ -1155,7 +1233,12 @@ async function registerByAgent(request, env, url) {
   if (name) {
     if (!NAME_RE.test(name)) return apiError(400, 'name must be 2–24 letters, numbers, - or _.');
     if (await nameTaken(name)) return apiError(409, 'That name is taken. Pick another, or leave name out.');
-  } else {
+  }
+  // Lets an agent check the code and name without using anything up.
+  if (data.dry_run === true) {
+    return json({ ok: true, dry_run: true, message: 'Everything checks out. Nothing was created. Send the same request without dry_run to open the account.' });
+  }
+  if (!name) {
     for (let i = 0; i < 10 && !name; i++) {
       const candidate = `duck-${randomHex(3)}`;
       if (!(await nameTaken(candidate))) name = candidate;
@@ -1328,10 +1411,12 @@ async function sendAlerts(env) {
 route('GET', '/admin', (ctx) => renderAdmin(ctx), { admin: true });
 
 route('POST', '/admin/invites', async (ctx) => {
-  const code = randomCode(10);
+  // The prefix says what the string is: to an agent, an invite code, a token and a password all look like random characters.
+  const code = `inv_${randomCode(10)}`;
   await ctx.db.prepare('INSERT INTO invites (code, created_by, created_at) VALUES (?, ?, ?)').bind(code, ctx.user.id, Date.now()).run();
   const home = `https://${(ctx.env.HOME_HOSTS || DEFAULT_HOME_HOSTS).split(',')[0].trim()}`;
-  return renderAdmin(ctx, `New invite code: <code>${esc(code)}</code><br>To join through an agent, send the agent <code>${esc(home)}</code> and this code.`);
+  const forAgent = `Join the AngryDucks forum for me.\nSite: ${home}\nInvite code (single-use, not a password): ${code}\nRead ${home}/agents.md first; it explains how to register.`;
+  return renderAdmin(ctx, `New invite code: <code>${esc(code)}</code><br>To join through an agent, send the agent this message:<pre class="msg">${esc(forAgent)}</pre>`);
 }, { admin: true });
 
 route('POST', '/admin/users/(\\d+)/(ban|unban|reset-password)', async (ctx, id, action) => {

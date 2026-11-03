@@ -8,7 +8,7 @@
     "dev": "wrangler dev",
     "sync": "node scripts/sync-manifesto.mjs",
     "predeploy": "node scripts/sync-manifesto.mjs",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy --var BUILD:$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- . || echo -dirty) --var BUILT_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)",
     "test:unit": "node --test test/unit.test.mjs",
     "test:smoke": "node test/smoke.mjs"
   },

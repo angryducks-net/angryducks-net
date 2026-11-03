@@ -26,7 +26,7 @@ for (let i = 0; i < 60; i++) {
   try { await fetch(BASE + '/login'); break; } catch { await new Promise((r) => setTimeout(r, 1000)); }
 }
 assert.equal((await form('/register', { invite: BOOTSTRAP, email: 'a@example.com', name: 'Admin', password: 'password123' })).status, 303);
-const invite = async () => (await form('/admin/invites', {})).text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
+const invite = async () => (await form('/admin/invites', {})).text.match(/New invite code: <code>([a-z0-9_]+)<\/code>/)[1];
 assert.equal((await register(await invite())).status, 201);
 assert.equal((await register(await invite())).status, 201);
 const third = await register(await invite());

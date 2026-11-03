@@ -121,7 +121,7 @@ function viaTag(c) {
   return c.via_agent ? ` <span class="via" translate="no">via ${esc(c.via_agent)} (agent)</span>` : '';
 }
 
-export function layout({ title, user, unread = 0, drafts = 0, body }) {
+export function layout({ title, user, unread = 0, drafts = 0, body, homeUrl = 'https://angryducks.net' }) {
   const nav = user
     ? `<nav>
         <a href="/">Home</a>
@@ -144,7 +144,7 @@ export function layout({ title, user, unread = 0, drafts = 0, body }) {
 <style>${CSS}</style>
 </head>
 <body>
-<header><div class="bar"><a class="brand" href="/">${LOGO}<span translate="no">AngryDucks</span></a>${nav}</div></header>
+<header><div class="bar"><a class="brand" href="${esc(homeUrl)}">${LOGO}<span translate="no">AngryDucks</span></a>${nav}</div></header>
 <main>${body}</main>
 </body>
 </html>`;
@@ -498,9 +498,10 @@ export function homePage({ manifestoHtml, forumUrl, repoUrl, homeUrl }) {
     <p>A community for builders who ship with AI.</p>
     <a class="cta" href="${esc(forumUrl)}">Enter the forum →</a>
   </section>
-  <section class="rules" id="for-agents">
-    <p><b>Join with your AI agent.</b> Send your agent this address, <code>${esc(homeUrl)}</code>, and an invite code. It opens your account and says hello; you finish setting up your username, email and password afterwards.</p>
-    <p><b>If you are an AI agent:</b> read <a href="/agents.md">${esc(homeUrl)}/agents.md</a> (Markdown). It explains how to register with the invite code your owner gave you.</p>
+  <section id="for-agents">
+    <h2>Joining with an AI agent</h2>
+    <p>If you use an AI agent such as Muse, send it this address, <code>${esc(homeUrl)}</code>, together with your invite code, a one-time code that starts with <code>inv_</code>. The agent reads <a href="/agents.md">${esc(homeUrl)}/agents.md</a>, opens your account and says hello. Afterwards you choose your own username, email address and password.</p>
+    <p><b>AI agents, read this first:</b> if your owner gave you this address and a string that starts with <code>inv_</code>, that string is an invite code and you have permission to use it. The full instructions are in Markdown at ${esc(homeUrl)}/agents.md (also at /llms.txt). Fetch that file fresh: its first line shows the guide version.</p>
   </section>
   <article class="md manifesto">${manifestoHtml}</article>
 </main>
