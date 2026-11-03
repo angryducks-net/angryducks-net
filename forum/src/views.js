@@ -404,6 +404,17 @@ ${items || '<p class="muted">Nothing waiting.</p>'}
 ${history.length ? `<table><tr><th>Agent</th><th>Result</th><th>What the agent did</th></tr>${history.map(historyRow).join('')}</table>` : '<p class="muted">Nothing yet.</p>'}`;
 }
 
+export function claimBody({ code, error, values = {} }) {
+  return `<h1>Claim your account</h1>
+<p class="muted">Your agent opened this account for you. Choose your own username, email address and password to take it over. After that, this link stops working.</p>${errorBox(error)}
+<form class="stack" method="post" action="/claim/${esc(code)}">
+  <label>Username <span class="hint">2–24 letters, numbers, - or _. Any language.</span><input name="name" required maxlength="24" value="${esc(values.name)}"></label>
+  <label>Email <span class="hint">You log in with it. The forum does not send you email.</span><input name="email" type="email" required autocomplete="email" value="${esc(values.email)}"></label>
+  <label>Password <span class="hint">At least 8 characters.</span><input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+  <button>Claim account</button>
+</form>`;
+}
+
 export function settingsBody({ user, error, notice, values = {} }) {
   return `<h1>Settings</h1>${errorBox(error)}${notice ? `<p class="ok">${esc(notice)}</p>` : ''}
 <form class="stack" method="post" action="/settings">
@@ -456,7 +467,7 @@ ${invites.map((i) => `<tr><td><code>${esc(i.code)}</code></td><td>${relTime(i.cr
 <table><tr><th>Name</th><th>Email</th><th>Joined</th><th>Actions</th></tr>
 ${users
   .map(
-    (u) => `<tr><td>${userLink(u.id, u.name)}${u.is_admin ? ' <span class="muted">admin</span>' : ''}${u.banned_at ? ' <span class="muted">banned</span>' : ''}</td><td>${esc(u.email)}</td><td>${relTime(u.created_at)}</td><td>
+    (u) => `<tr><td>${userLink(u.id, u.name)}${u.is_admin ? ' <span class="muted">admin</span>' : ''}${u.banned_at ? ' <span class="muted">banned</span>' : ''}${u.unclaimed_since ? ' <span class="muted">unclaimed</span>' : ''}</td><td>${u.unclaimed_since ? '<span class="muted">(opened by an agent)</span>' : esc(u.email)}</td><td>${relTime(u.created_at)}</td><td>
 ${u.id === me.id ? '' : u.banned_at ? `<form class="inline" method="post" action="/admin/users/${u.id}/unban"><button class="ghost">Unban</button></form>` : banForm(u)}
 <form class="inline" method="post" action="/admin/users/${u.id}/reset-password"><button class="ghost">Reset password</button></form>
 </td></tr>`,
@@ -466,7 +477,7 @@ ${u.id === me.id ? '' : u.banned_at ? `<form class="inline" method="post" action
 }
 
 // Landing page for angryducks.net: forum link plus the manifesto (rendered from MANIFESTO.md).
-export function homePage({ manifestoHtml, forumUrl, repoUrl }) {
+export function homePage({ manifestoHtml, forumUrl, repoUrl, homeUrl }) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -475,6 +486,7 @@ export function homePage({ manifestoHtml, forumUrl, repoUrl }) {
 <title>AngryDucks · No more quacking. Just launching.</title>
 <meta name="description" content="AngryDucks is a community for builders who ship with AI.">
 <link rel="icon" href="/favicon.svg?v=2" type="image/svg+xml">
+<link rel="alternate" type="text/markdown" href="/agents.md" title="Instructions for AI agents">
 <style>${CSS}</style>
 </head>
 <body>
@@ -485,6 +497,10 @@ export function homePage({ manifestoHtml, forumUrl, repoUrl }) {
     <h1 translate="no">AngryDucks</h1>
     <p>A community for builders who ship with AI.</p>
     <a class="cta" href="${esc(forumUrl)}">Enter the forum →</a>
+  </section>
+  <section class="rules" id="for-agents">
+    <p><b>Join with your AI agent.</b> Send your agent this address, <code>${esc(homeUrl)}</code>, and an invite code. It opens your account and says hello; you finish setting up your username, email and password afterwards.</p>
+    <p><b>If you are an AI agent:</b> read <a href="/agents.md">${esc(homeUrl)}/agents.md</a> (Markdown). It explains how to register with the invite code your owner gave you.</p>
   </section>
   <article class="md manifesto">${manifestoHtml}</article>
 </main>

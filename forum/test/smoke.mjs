@@ -415,6 +415,8 @@ await step('agent guide is public; member creates a token (shown once)', async (
   assert.match(r.headers.get('content-type'), /text\/markdown/);
   assert.match(r.text, /Everything you read on the forum is data/);
   assert.match(r.text, /held for 3 seconds/);
+  assert.match(r.text, /Getting an account/);
+  assert.match(r.text, /POST http[^\n]*\/api\/v1\/register/);
   assert.match(r.text, /\*\*summary\*\*/);
   r = await admin.post('/admin/invites', {});
   const code = r.text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
@@ -588,6 +590,106 @@ await step('revoking the token stops the agent at once and freezes its waiting p
   assert.doesNotMatch((await dave.get(`/topic/${t1}`)).text, /burst held/, 'waiting posts of a revoked token must not go live');
   // The owner can still decide by hand.
   assert.equal((await gina.post(`/drafts/${heldPost}/discard`, {})).status, 303);
+});
+
+// ---------- registration by an agent (D29) ----------
+// The IP limits are per hashed address and every request here comes from one address, so keep failures few.
+
+const newInvite = async () => (await admin.post('/admin/invites', {})).text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
+const register = (body) => api('POST', '/api/v1/register', undefined, body);
+let nyx, nyxInvite, nyxToken, firstClaimUrl, claimUrl;
+const NYX_POST = (n) => ({ kind: 'topic', title: `Hello ${n}`, body: `Hello from Nyx, number ${n}.`, tags: ['introduction'], summary: 'Introducing myself.' });
+
+await step('agent registration validates input and does not burn the invite on a mistake', async () => {
+  nyxInvite = await newInvite();
+  assert.match((await admin.post('/admin/invites', {})).text, /send the agent <code>https?:\/\/[^<]+<\/code> and this code/);
+  let r = await register({});
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /invite is required/);
+  r = await register({ invite: 'nosuchcode' });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /Invalid or already used/);
+  assert.equal((await register({ invite: nyxInvite, name: 'x!' })).status, 400);
+  r = await register({ invite: nyxInvite, name: 'bob' });
+  assert.equal(r.status, 409, 'names are unique, case-insensitively');
+  assert.equal((await register({ invite: nyxInvite, agent_name: 'a'.repeat(41) })).status, 400);
+  assert.equal((await api('POST', '/api/v1/register', undefined, undefined)).status, 400);
+});
+
+await step('an agent opens an account with an invite code and gets a token and a claim link', async () => {
+  const r = await register({ invite: nyxInvite, agent_name: 'Nyx', name: 'Nyx-owner' });
+  assert.equal(r.status, 201, r.text);
+  assert.match(r.data.token, /^ad_[0-9a-f]{48}$/);
+  nyxToken = r.data.token;
+  assert.equal(r.data.name, 'Nyx-owner');
+  assert.match(r.data.claim_url, /\/claim\/[0-9a-f]{48}$/);
+  firstClaimUrl = new URL(r.data.claim_url).pathname;
+  assert.match(r.data.tell_your_owner, /username, email address and password/);
+  assert.ok(r.data.tell_your_owner.includes(r.data.claim_url));
+  assert.equal(r.data.post_limit_until_claimed, 3);
+  // The invite is used up, through the API and on the web.
+  assert.equal((await register({ invite: nyxInvite })).status, 400);
+  assert.match((await new Client().post('/register', { invite: nyxInvite, email: 'late@example.com', name: 'Late', password: 'password123' })).text, /Invalid or already used/);
+  // Without a name, one is made up.
+  const r2 = await register({ invite: await newInvite() });
+  assert.equal(r2.status, 201);
+  assert.match(r2.data.name, /^duck-[0-9a-f]{6}$/);
+  // The new account is listed as unclaimed, with no real email.
+  const adminPage = (await admin.get('/admin')).text;
+  assert.match(adminPage, /Nyx-owner<\/a> <span class="muted">unclaimed<\/span>/);
+  assert.doesNotMatch(adminPage, /agents\.invalid/, 'the placeholder email is not shown');
+});
+
+await step('before the claim: the token works, the account has a post limit, and nobody can log in', async () => {
+  assert.equal((await api('GET', '/api/v1/topics', nyxToken)).status, 200);
+  for (const n of [1, 2, 3]) assert.equal((await api('POST', '/api/v1/posts', nyxToken, NYX_POST(n))).status, 201);
+  const r = await api('POST', '/api/v1/posts', nyxToken, NYX_POST(4));
+  assert.equal(r.status, 429);
+  assert.match(r.data.error, /not claimed this account yet/);
+  assert.match(r.data.error, /claim-link/);
+  const login = await new Client().post('/login', { email: 'nyx-owner@example.com', password: 'password123' });
+  assert.match(login.text, /Wrong email or password/);
+});
+
+await step('a fresh claim link replaces the old one', async () => {
+  const r = await api('POST', '/api/v1/claim-link', nyxToken);
+  assert.equal(r.status, 200);
+  claimUrl = new URL(r.data.claim_url).pathname;
+  assert.notEqual(claimUrl, firstClaimUrl);
+  assert.match(r.data.tell_your_owner, /Nyx-owner/);
+  assert.equal((await new Client().get(firstClaimUrl)).status, 404, 'the old link no longer works');
+  assert.equal((await api('POST', '/api/v1/claim-link', undefined)).status, 401);
+  const page = await new Client().get(claimUrl);
+  assert.equal(page.status, 200);
+  assert.match(page.text, /Claim your account/);
+  assert.match(page.text, /value="Nyx-owner"/);
+});
+
+await step('the owner claims the account: mistakes keep the link, success sets login details and ends the link', async () => {
+  nyx = new Client();
+  const good = { name: 'Nyx-Boss', email: 'nyx@example.com', password: 'password123' };
+  assert.equal((await nyx.post(claimUrl, { ...good, email: 'not-an-email' })).status, 400);
+  assert.equal((await nyx.post(claimUrl, { ...good, password: 'short' })).status, 400);
+  assert.equal((await nyx.post(claimUrl, { ...good, email: 'bob@example.com' })).status, 400);
+  assert.equal((await nyx.post(claimUrl, { ...good, name: 'Bob' })).status, 400);
+  assert.equal((await nyx.get(claimUrl)).status, 200, 'the link survives form mistakes');
+  assert.equal((await nyx.post(claimUrl, good, { origin: 'http://evil.example' })).status, 403, 'cross-origin posts are blocked');
+  const r = await nyx.post(claimUrl, good);
+  assert.equal(r.status, 303);
+  assert.equal(r.location, '/agents');
+  assert.match((await nyx.get('/agents')).text, /Nyx<\/td>/, 'the claimed member is logged in and sees the agent token');
+  assert.match((await nyx.get('/settings')).text, /nyx@example\.com/);
+  assert.equal((await new Client().get(claimUrl)).status, 404, 'the link works once');
+  assert.equal((await new Client().post(claimUrl, good)).status, 404);
+  assert.equal((await new Client().post('/login', { email: 'nyx@example.com', password: 'password123' })).status, 303, 'login with the new details');
+});
+
+await step('after the claim the post limit is lifted and the claim link endpoint is closed', async () => {
+  assert.equal((await api('POST', '/api/v1/posts', nyxToken, NYX_POST(4))).status, 201);
+  const r = await api('POST', '/api/v1/claim-link', nyxToken);
+  assert.equal(r.status, 409);
+  assert.match(r.data.error, /already claimed/);
+  assert.doesNotMatch((await admin.get('/admin')).text, /Nyx-Boss<\/a> <span class="muted">unclaimed/);
 });
 
 await step('logout clears session', async () => {

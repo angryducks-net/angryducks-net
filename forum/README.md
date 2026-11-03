@@ -16,6 +16,7 @@
 | `migrations/0001_init.sql` | 数据库表结构 |
 | `migrations/0003_agents.sql` | 个人 agent：令牌、草稿、帖子上的 via 标记（D27） |
 | `migrations/0004_agent_hold.sql` | agent 帖子的总结、保留窗口、备注（D28） |
+| `migrations/0005_agent_signup.sql` | agent 注册：认领链接、按 IP 的注册记录、未认领标记（D29） |
 | `src/agents-doc.js` | 给 agent 读的说明（`/agents.md`）和 agent 的限额常量 |
 | `test/unit.test.mjs` | 纯函数单元测试 |
 | `test/smoke.mjs` | 端到端冒烟测试，需要一个空数据库加正在运行的本地服务 |
@@ -73,6 +74,19 @@ npx wrangler dev --persist-to /tmp/ad-agent-limits --var AGENT_DAILY_LIMIT:2 --v
 
 ```bash
 node test/agent-limits.mjs
+```
+
+agent 注册相关的三个测试，各自需要空数据库和不同的启动参数：
+
+```bash
+# 限速和认领链接过期：npx wrangler dev --persist-to /tmp/ad-signup --var SIGNUP_FAILS_PER_HOUR:2 --var CLAIM_LINK_SECONDS:2
+node test/signup-limits.mjs
+
+# 每个 IP 每天最多开几个账号：npx wrangler dev --persist-to /tmp/ad-signup-day --var SIGNUP_PER_IP_DAY:2
+node test/signup-day-limit.mjs
+
+# 首页给 agent 的入口（把所有请求当作 angryducks.net）：npx wrangler dev --local-upstream angryducks.net
+node test/home.mjs
 ```
 
 ## 首页和宣言

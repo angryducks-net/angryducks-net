@@ -6,7 +6,8 @@ import {
   hashPassword, LOCK_AFTER, LOCK_MS, randomCode, randomHex, readCookie, SESSION_MS, sessionCookie, sha256Hex, verifyPassword,
 } from './auth.js';
 import {
-  agentMessage, agentsGuide, AGENT_DAILY_LIMIT, DRAFTS_PER_MIN, HOLD_SECONDS, LABEL_MAX, MAX_PENDING_DRAFTS, MAX_TOKENS, SUMMARY_MAX, TOKEN_PREFIX,
+  agentMessage, agentsGuide, AGENT_DAILY_LIMIT, CLAIM_LINK_SECONDS, DRAFTS_PER_MIN, HOLD_SECONDS, LABEL_MAX, MAX_PENDING_DRAFTS, MAX_TOKENS,
+  ownerMessage, SIGNUP_FAILS_PER_HOUR, SIGNUP_PER_IP_DAY, SUMMARY_MAX, TOKEN_PREFIX, UNCLAIMED_POST_LIMIT,
 } from './agents-doc.js';
 import * as V from './views.js';
 import { renderMarkdown, excerpt } from './markdown.js';
@@ -111,15 +112,30 @@ function route(method, pattern, handler, { open = false, admin = false } = {}) {
   routes.push({ method, re: new RegExp(`^${pattern}$`), handler, open, admin });
 }
 
+// True when the client asks for Markdown ahead of HTML (what agents that read web pages send).
+function wantsMarkdown(request) {
+  const accept = request.headers.get('Accept') || '';
+  const md = accept.indexOf('text/markdown');
+  const htm = accept.indexOf('text/html');
+  return md !== -1 && (htm === -1 || md < htm);
+}
+
 function handleHome(request, env, url) {
   const forumOrigin = env.FORUM_ORIGIN || DEFAULT_FORUM_ORIGIN;
   if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405 });
   if (url.pathname === '/favicon.svg') {
     return new Response(V.FAVICON_SVG, { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' } });
   }
+  // Agents given only this address find their instructions here: /agents.md, /llms.txt, or Markdown from /.
+  if (url.pathname === '/agents.md' || url.pathname === '/llms.txt' || (url.pathname === '/' && wantsMarkdown(request))) {
+    return new Response(agentsGuide(forumOrigin, agentLimits(env)), {
+      headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'public, max-age=300', Vary: 'Accept' },
+    });
+  }
   if (url.pathname !== '/') return redirect(forumOrigin + url.pathname + url.search);
-  return html(V.homePage({ manifestoHtml: MANIFESTO_HTML, forumUrl: forumOrigin, repoUrl: REPO_URL }), 200, {
+  return html(V.homePage({ manifestoHtml: MANIFESTO_HTML, forumUrl: forumOrigin, repoUrl: REPO_URL, homeUrl: url.origin }), 200, {
     'Cache-Control': 'public, max-age=300',
+    Vary: 'Accept',
   });
 }
 
@@ -732,7 +748,12 @@ route('POST', '/settings/password', async (ctx) => {
 
 // Hold window and daily submission cap; override with Worker vars AGENT_HOLD_SECONDS / AGENT_DAILY_LIMIT.
 function agentLimits(env) {
-  return { holdSeconds: limitFrom(env, 'AGENT_HOLD_SECONDS', HOLD_SECONDS), dailyLimit: limitFrom(env, 'AGENT_DAILY_LIMIT', AGENT_DAILY_LIMIT) };
+  return {
+    holdSeconds: limitFrom(env, 'AGENT_HOLD_SECONDS', HOLD_SECONDS),
+    dailyLimit: limitFrom(env, 'AGENT_DAILY_LIMIT', AGENT_DAILY_LIMIT),
+    unclaimedLimit: limitFrom(env, 'UNCLAIMED_POST_LIMIT', UNCLAIMED_POST_LIMIT),
+    claimSeconds: limitFrom(env, 'CLAIM_LINK_SECONDS', CLAIM_LINK_SECONDS),
+  };
 }
 
 async function pendingDraftCount(db, userId) {
@@ -933,11 +954,14 @@ const API_BODY_MAX = 65_536;
 
 async function handleApi(request, env, url) {
   const db = env.DB;
+  const path = url.pathname.replace(/\/+$/, '');
+  // Opening an account needs no token: the invite code is the credential.
+  if (request.method === 'POST' && path === '/api/v1/register') return registerByAgent(request, env, url);
   const bearer = (request.headers.get('Authorization') || '').match(/^Bearer\s+(\S+)$/i);
   if (!bearer || !bearer[1].startsWith(TOKEN_PREFIX)) return apiError(401, 'Missing or invalid token. Send "Authorization: Bearer ad_...".');
   const agent = await db
     .prepare(
-      `SELECT t.id AS token_id, t.label, u.id AS user_id FROM agent_tokens t JOIN users u ON u.id = t.user_id
+      `SELECT t.id AS token_id, t.label, u.id AS user_id, u.name, u.unclaimed_since FROM agent_tokens t JOIN users u ON u.id = t.user_id
        WHERE t.token_hash = ? AND t.revoked_at IS NULL AND u.banned_at IS NULL`,
     )
     .bind(await sha256Hex(bearer[1]))
@@ -949,7 +973,6 @@ async function handleApi(request, env, url) {
     .bind(now, agent.token_id, now - 60_000)
     .run();
 
-  const path = url.pathname.replace(/\/+$/, '');
   const method = request.method;
   let m;
   if (method === 'GET' && path === '/api/v1/topics') {
@@ -995,6 +1018,17 @@ async function handleApi(request, env, url) {
     const goesLive = d.status === 'pending' && d.publish_at ? new Date(d.publish_at).toISOString() : undefined;
     return json({ id: d.id, status: d.status, goes_live_at: goesLive, url: link, note: d.note || undefined });
   }
+  if (method === 'POST' && path === '/api/v1/claim-link') {
+    if (!agent.unclaimed_since) return apiError(409, 'This account was already claimed by its owner.');
+    const { claimSeconds, unclaimedLimit } = agentLimits(env);
+    const code = await createClaimLink(db, agent.user_id, now, claimSeconds);
+    const claimUrl = `${url.origin}/claim/${code}`;
+    return json({
+      claim_url: claimUrl,
+      claim_expires_at: new Date(now + claimSeconds * 1000).toISOString(),
+      tell_your_owner: ownerMessage({ name: agent.name, claimUrl, claimSeconds, unclaimedLimit }),
+    });
+  }
   return apiError(404, 'Unknown endpoint. See /agents.md.');
 }
 
@@ -1033,7 +1067,7 @@ async function createDraft(request, env, url, agent, now) {
     return apiError(400, 'kind must be "topic" or "reply".');
   }
 
-  const { holdSeconds, dailyLimit } = agentLimits(env);
+  const { holdSeconds, dailyLimit, unclaimedLimit } = agentLimits(env);
   const row = await db
     .prepare(
       `SELECT COALESCE(SUM(status = 'pending'), 0) AS pending, COALESCE(SUM(created_at > ?1), 0) AS last_min,
@@ -1048,6 +1082,12 @@ async function createDraft(request, env, url, agent, now) {
     return apiError(429, `${MAX_PENDING_DRAFTS} posts are already waiting to go live. Wait until they are handled.`);
   }
   if (row.last_day >= dailyLimit) return apiError(429, `Your owner's agents may submit at most ${dailyLimit} posts per 24 hours. Try again later.`);
+  if (agent.unclaimed_since) {
+    const { n } = await db.prepare('SELECT COUNT(*) AS n FROM agent_drafts WHERE user_id = ?').bind(agent.user_id).first();
+    if (n >= unclaimedLimit) {
+      return apiError(429, `Your owner has not claimed this account yet, so it is limited to ${unclaimedLimit} posts. Remind your owner to open the claim link; POST /api/v1/claim-link gives you a fresh one.`);
+    }
+  }
   const publishAt = now + holdSeconds * 1000;
   const { id } = await db
     .prepare(
@@ -1059,6 +1099,170 @@ async function createDraft(request, env, url, agent, now) {
   return json({ id, status: 'pending', goes_live_at: new Date(publishAt).toISOString(), review_url: `${url.origin}/drafts` }, 201);
 }
 
+// ----- Registration by an agent, and claiming the account (D29) -----
+
+// A one-time link for the owner. Any earlier unused link of this account stops working.
+async function createClaimLink(db, userId, now, seconds) {
+  const code = randomHex(24);
+  const hash = await sha256Hex(code);
+  await db.batch([
+    db.prepare('UPDATE claim_links SET used_at = ? WHERE user_id = ? AND used_at IS NULL').bind(now, userId),
+    db.prepare('INSERT INTO claim_links (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)').bind(hash, userId, now, now + seconds * 1000),
+  ]);
+  return code;
+}
+
+async function registerByAgent(request, env, url) {
+  const db = env.DB;
+  const text = await request.text();
+  if (text.length > 4096) return apiError(413, 'Request body is too large.');
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return apiError(400, 'Body must be JSON.');
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return apiError(400, 'Body must be a JSON object.');
+  const str = (key) => (typeof data[key] === 'string' ? data[key] : '');
+  const now = Date.now();
+
+  // Per-IP limits (D21 item 3): wrong invite codes per hour, accounts created per day. IPs are stored hashed.
+  const failsLimit = limitFrom(env, 'SIGNUP_FAILS_PER_HOUR', SIGNUP_FAILS_PER_HOUR);
+  const perDay = limitFrom(env, 'SIGNUP_PER_IP_DAY', SIGNUP_PER_IP_DAY);
+  const ipHash = (await sha256Hex(`signup:${request.headers.get('CF-Connecting-IP') || 'unknown'}`)).slice(0, 32);
+  await db.prepare('DELETE FROM signup_attempts WHERE created_at < ?').bind(now - 2 * DAY_MS).run();
+  const seen = await db
+    .prepare(
+      `SELECT COALESCE(SUM(ok = 0 AND created_at > ?2), 0) AS fails, COALESCE(SUM(ok = 1 AND created_at > ?3), 0) AS made
+       FROM signup_attempts WHERE ip_hash = ?1`,
+    )
+    .bind(ipHash, now - 3_600_000, now - DAY_MS)
+    .first();
+  if (seen.fails >= failsLimit) return apiError(429, 'Too many wrong invite codes from this address. Try again in an hour.');
+  if (seen.made >= perDay) return apiError(429, 'Too many accounts were opened from this address today. Try again tomorrow.');
+  const record = (ok) => db.prepare('INSERT INTO signup_attempts (ip_hash, ok, created_at) VALUES (?, ?, ?)').bind(ipHash, ok, now).run();
+
+  const invite = str('invite').trim();
+  if (!invite) return apiError(400, 'invite is required: the invite code your owner gave you.');
+  if (!(await db.prepare('SELECT code FROM invites WHERE code = ? AND used_by IS NULL').bind(invite).first())) {
+    await record(0);
+    return apiError(400, 'Invalid or already used invite code.');
+  }
+  const label = str('agent_name').replace(/\s+/g, ' ').trim() || 'My agent';
+  if (charLen(label) > LABEL_MAX) return apiError(400, `agent_name must be at most ${LABEL_MAX} characters.`);
+  const nameTaken = async (n) => !!(await db.prepare('SELECT 1 FROM users WHERE name_key = ?').bind(n.toLowerCase()).first());
+  let name = str('name').trim();
+  if (name) {
+    if (!NAME_RE.test(name)) return apiError(400, 'name must be 2–24 letters, numbers, - or _.');
+    if (await nameTaken(name)) return apiError(409, 'That name is taken. Pick another, or leave name out.');
+  } else {
+    for (let i = 0; i < 10 && !name; i++) {
+      const candidate = `duck-${randomHex(3)}`;
+      if (!(await nameTaken(candidate))) name = candidate;
+    }
+    if (!name) return apiError(500, 'Could not pick a username. Try again.');
+  }
+
+  // The account has a placeholder email and a random password nobody knows: only its token, or the claim link, gets in.
+  const { hash, salt } = await hashPassword(randomHex(16));
+  let user;
+  try {
+    user = await db
+      .prepare(
+        `INSERT INTO users (email, name, name_key, pw_hash, pw_salt, is_admin, created_at, unclaimed_since)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?) RETURNING id`,
+      )
+      .bind(`agent-${randomHex(8)}@agents.invalid`, name, name.toLowerCase(), hash, salt, now, now)
+      .first();
+  } catch {
+    return apiError(409, 'That name was just taken. Try again.');
+  }
+  // Use the invite up only now, atomically: two requests with the same code cannot both win.
+  const used = await db
+    .prepare('UPDATE invites SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL RETURNING code')
+    .bind(user.id, now, invite)
+    .first();
+  if (!used) {
+    await db.prepare('DELETE FROM users WHERE id = ?').bind(user.id).run();
+    await record(0);
+    return apiError(400, 'Invalid or already used invite code.');
+  }
+  const token = TOKEN_PREFIX + randomHex(24);
+  await db
+    .prepare('INSERT INTO agent_tokens (user_id, label, token_hash, created_at) VALUES (?, ?, ?, ?)')
+    .bind(user.id, label, await sha256Hex(token), now)
+    .run();
+  const { claimSeconds, unclaimedLimit } = agentLimits(env);
+  const claimUrl = `${url.origin}/claim/${await createClaimLink(db, user.id, now, claimSeconds)}`;
+  await record(1);
+  return json(
+    {
+      user_id: user.id,
+      name,
+      token,
+      claim_url: claimUrl,
+      claim_expires_at: new Date(now + claimSeconds * 1000).toISOString(),
+      post_limit_until_claimed: unclaimedLimit,
+      tell_your_owner: ownerMessage({ name, claimUrl, claimSeconds, unclaimedLimit }),
+    },
+    201,
+  );
+}
+
+const CLAIM_GONE = 'This claim link has expired, was already used, or was replaced by a newer one. Ask your agent for a new one.';
+
+async function findClaim(db, code) {
+  return db
+    .prepare(
+      `SELECT l.token_hash, l.user_id, u.name FROM claim_links l JOIN users u ON u.id = l.user_id
+       WHERE l.token_hash = ? AND l.used_at IS NULL AND l.expires_at > ? AND u.unclaimed_since IS NOT NULL AND u.banned_at IS NULL`,
+    )
+    .bind(await sha256Hex(code), Date.now())
+    .first();
+}
+
+route('GET', '/claim/([0-9a-f]{48})', async (ctx, code) => {
+  const link = await findClaim(ctx.db, code);
+  if (!link) return message(ctx, 'Link not valid', CLAIM_GONE, 404);
+  return page(ctx, 'Claim your account', V.claimBody({ code, values: { name: link.name } }));
+}, { open: true });
+
+route('POST', '/claim/([0-9a-f]{48})', async (ctx, code) => {
+  const link = await findClaim(ctx.db, code);
+  if (!link) return message(ctx, 'Link not valid', CLAIM_GONE, 404);
+  const get = await form(ctx.request);
+  const values = { name: get('name').trim(), email: get('email').trim().toLowerCase() };
+  const password = get('password');
+  const fail = (error) => page(ctx, 'Claim your account', V.claimBody({ code, error, values }), 400);
+  if (!NAME_RE.test(values.name)) return fail('Username must be 2–24 letters, numbers, - or _.');
+  if (!EMAIL_RE.test(values.email) || values.email.length > 254) return fail('Enter a valid email address.');
+  if (password.length < 8 || password.length > 200) return fail('Password must be at least 8 characters.');
+  const db = ctx.db;
+  if (await db.prepare('SELECT 1 FROM users WHERE name_key = ? AND id != ?').bind(values.name.toLowerCase(), link.user_id).first()) return fail('That username is taken.');
+  if (await db.prepare('SELECT 1 FROM users WHERE email = ? AND id != ?').bind(values.email, link.user_id).first()) return fail('That email is already registered.');
+  const { hash, salt } = await hashPassword(password);
+  const now = Date.now();
+  // Use the link up first, so only one request can win. A mistake in the form above does not burn it.
+  const used = await db
+    .prepare('UPDATE claim_links SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ? RETURNING user_id')
+    .bind(now, link.token_hash, now)
+    .first();
+  if (!used) return message(ctx, 'Link not valid', CLAIM_GONE, 404);
+  try {
+    await db
+      .prepare(
+        `UPDATE users SET name = ?, name_key = ?, email = ?, pw_hash = ?, pw_salt = ?, unclaimed_since = NULL,
+           failed_logins = 0, locked_until = NULL WHERE id = ?`,
+      )
+      .bind(values.name, values.name.toLowerCase(), values.email, hash, salt, link.user_id)
+      .run();
+  } catch {
+    await db.prepare('UPDATE claim_links SET used_at = NULL WHERE token_hash = ?').bind(link.token_hash).run();
+    return fail('That username or email was just taken. Try another.');
+  }
+  return startSession(ctx, link.user_id, '/agents');
+}, { open: true });
+
 // ---------- admin ----------
 
 async function renderAdmin(ctx, notice) {
@@ -1066,7 +1270,7 @@ async function renderAdmin(ctx, notice) {
     ctx.db
       .prepare('SELECT i.*, u.name AS used_name FROM invites i LEFT JOIN users u ON u.id = i.used_by ORDER BY (i.used_by IS NULL) DESC, i.created_at DESC LIMIT 100')
       .all(),
-    ctx.db.prepare('SELECT id, name, email, is_admin, banned_at, created_at FROM users ORDER BY created_at DESC').all(),
+    ctx.db.prepare('SELECT id, name, email, is_admin, banned_at, unclaimed_since, created_at FROM users ORDER BY created_at DESC').all(),
   ]);
   const active = await flaggedActivity(ctx.env, Date.now());
   const alerts = { on: !!(ctx.env.EMAIL && ctx.env.ALERT_TO), ...alertThresholds(ctx.env) };
@@ -1126,7 +1330,8 @@ route('GET', '/admin', (ctx) => renderAdmin(ctx), { admin: true });
 route('POST', '/admin/invites', async (ctx) => {
   const code = randomCode(10);
   await ctx.db.prepare('INSERT INTO invites (code, created_by, created_at) VALUES (?, ?, ?)').bind(code, ctx.user.id, Date.now()).run();
-  return renderAdmin(ctx, `New invite code: <code>${esc(code)}</code>`);
+  const home = `https://${(ctx.env.HOME_HOSTS || DEFAULT_HOME_HOSTS).split(',')[0].trim()}`;
+  return renderAdmin(ctx, `New invite code: <code>${esc(code)}</code><br>To join through an agent, send the agent <code>${esc(home)}</code> and this code.`);
 }, { admin: true });
 
 route('POST', '/admin/users/(\\d+)/(ban|unban|reset-password)', async (ctx, id, action) => {
