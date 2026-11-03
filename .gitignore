@@ -1,0 +1,22 @@
+# OS
+.DS_Store
+
+# Dependencies and local build/runtime state
+node_modules/
+.wrangler/
+
+# Secrets: never commit
+.dev.vars
+.bootstrap-code
+*.pem
+.env
+.env.*
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Private notes that must never be committed
+localonly/
+
+# Local tool settings (paths point into localonly/)
+.claude/
