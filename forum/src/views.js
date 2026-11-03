@@ -31,6 +31,7 @@ h2{font-size:18px;margin:28px 0 10px}
 .list li{padding:12px 0;border-bottom:1px solid var(--line)}
 .list .title{font-weight:600;text-decoration:none;font-size:17px}
 .list .title:hover{text-decoration:underline}
+.excerpt{margin:2px 0 4px;color:#45454c;font-size:15px;line-height:1.5;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
 .text{white-space:pre-wrap;overflow-wrap:anywhere}
 .post{padding:14px 0;border-bottom:1px solid var(--line)}
 .post .meta{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center}
@@ -174,6 +175,7 @@ export function topicListBody({ topics, tags, activeTag }) {
         .map(
           (t) => `<li>
   <a class="title" href="/topic/${t.id}"${langAttr(t.lang)} dir="auto">${esc(t.title)}</a>
+  ${t.excerpt ? `<p class="excerpt"${langAttr(t.lang)} dir="auto">${esc(t.excerpt)}</p>` : ''}
   <div class="tags">${t.tags.map((g) => tagLink(g)).join('')}</div>
   <div class="muted">${userLink(t.author_id, t.author_name)} · ${relTime(t.created_at)} · ${t.votes} vote${t.votes === 1 ? '' : 's'} · ${t.replies} repl${t.replies === 1 ? 'y' : 'ies'}</div>
 </li>`,

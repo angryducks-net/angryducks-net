@@ -141,3 +141,11 @@ test('home page: forum link, manifesto, no scripts', () => {
   assert.match(html, /The Four Ground Rules/);
   assert.doesNotMatch(html, /<script/i);
 });
+
+test('excerpt: markdown syntax stripped, whitespace collapsed, long text cut', async () => {
+  const { excerpt } = await import('../src/markdown.js');
+  assert.equal(excerpt('# Hi\n\n**bold** [link](https://a.com)\n- one\n- two'), 'Hi bold link one two');
+  assert.equal(excerpt('<b>x</b>'), '<b>x</b>');
+  assert.equal(excerpt('中'.repeat(250)), '中'.repeat(200) + '…');
+  assert.equal(excerpt(''), '');
+});

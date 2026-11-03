@@ -6,7 +6,7 @@ import {
   hashPassword, LOCK_AFTER, LOCK_MS, randomCode, randomHex, readCookie, SESSION_MS, sessionCookie, sha256Hex, verifyPassword,
 } from './auth.js';
 import * as V from './views.js';
-import { renderMarkdown } from './markdown.js';
+import { renderMarkdown, excerpt } from './markdown.js';
 import { MANIFESTO_MD } from './manifesto.generated.js';
 
 const MAX_PRODUCTS = 10;
@@ -247,6 +247,7 @@ async function hotTopics(db, tag) {
   const filter = tag ? 'AND c.id IN (SELECT ct.content_id FROM content_tags ct JOIN tags g ON g.id = ct.tag_id WHERE g.name = ?)' : '';
   const stmt = db.prepare(
     `SELECT c.id, c.title, c.lang, c.author_id, c.created_at, u.name AS author_name,
+       substr(c.body, 1, 600) AS body_head,
        (SELECT COUNT(*) FROM votes v WHERE v.content_id = c.id) AS votes,
        (SELECT COUNT(*) FROM content r WHERE r.topic_id = c.id AND r.deleted_at IS NULL) AS replies,
        (SELECT COUNT(DISTINCT r.author_id) FROM content r
@@ -262,7 +263,7 @@ async function hotTopics(db, tag) {
     .sort((a, b) => b.score - a.score || b.created_at - a.created_at)
     .slice(0, LIST_LIMIT);
   const tags = await tagsFor(db, top.map((t) => t.id));
-  return top.map((t) => ({ ...t, tags: tags.get(t.id) }));
+  return top.map((t) => ({ ...t, tags: tags.get(t.id), excerpt: excerpt(t.body_head) }));
 }
 
 async function popularTags(db) {

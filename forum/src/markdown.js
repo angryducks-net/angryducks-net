@@ -33,3 +33,21 @@ md.renderer.rules.table_close = () => '</table></div>\n';
 export function renderMarkdown(text) {
   return md.render(String(text ?? ''));
 }
+
+// Markdown -> one line of plain text for list previews. Uses the parser's own text
+// tokens so syntax characters (**, #, [](), |) never show up in the excerpt.
+export function excerpt(text, max = 200) {
+  const parts = [];
+  for (const block of md.parse(String(text ?? ''), {})) {
+    if (block.type !== 'inline') continue;
+    for (const t of block.children) {
+      if (t.type === 'text' || t.type === 'code_inline') parts.push(t.content);
+      else if (t.type === 'softbreak' || t.type === 'hardbreak') parts.push(' ');
+      else if (t.type === 'image') parts.push(`[image: ${t.content || 'untitled'}]`);
+    }
+    parts.push(' ');
+  }
+  const plain = parts.join('').replace(/\s+/g, ' ').trim();
+  const chars = [...plain];
+  return chars.length > max ? `${chars.slice(0, max).join('').trimEnd()}…` : plain;
+}
