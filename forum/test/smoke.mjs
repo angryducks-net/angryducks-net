@@ -625,7 +625,8 @@ await step('agent registration validates input and does not burn the invite on a
   assert.match(r.data.error, /invite is required/);
   r = await register({ invite: 'nosuchcode' });
   assert.equal(r.status, 400);
-  assert.match(r.data.error, /Invalid or already used/);
+  assert.match(r.data.error, /No such invite code/);
+  assert.match(r.data.error, /Nothing was used up/);
   assert.equal((await register({ invite: nyxInvite, name: 'x!' })).status, 400);
   r = await register({ invite: nyxInvite, name: 'bob' });
   assert.equal(r.status, 409, 'names are unique, case-insensitively');
@@ -638,6 +639,10 @@ await step('agent registration validates input and does not burn the invite on a
   assert.equal((await register({ invite: nyxInvite, dry_run: true, name: 'bob' })).status, 409, 'a dry run still reports a taken name');
   assert.equal((await register({ invite: 'inv_nosuchcode', dry_run: true })).status, 400, 'and a wrong code');
   assert.equal((await register({ invite: nyxInvite, dry_run: true, name: 'Nyx-owner' })).status, 200, 'the code is still unused after dry runs');
+  // Codes pass through chat with quotes, capitals, or the prefix dropped; all still find the code.
+  for (const sent of [`\`${nyxInvite.toUpperCase()}\``, `"${nyxInvite}".`, nyxInvite.slice(4), `  ${nyxInvite}\n`]) {
+    assert.equal((await register({ invite: sent, dry_run: true })).status, 200, `tolerated: ${JSON.stringify(sent)}`);
+  }
   assert.equal(dry.headers.get('x-angryducks-version'), 'dev', 'every API response carries the version');
 });
 
@@ -653,7 +658,9 @@ await step('an agent opens an account with an invite code and gets a token and a
   assert.ok(r.data.tell_your_owner.includes(r.data.claim_url));
   assert.equal(r.data.post_limit_until_claimed, 3);
   // The invite is used up, through the API and on the web.
-  assert.equal((await register({ invite: nyxInvite })).status, 400);
+  const again = await register({ invite: nyxInvite });
+  assert.equal(again.status, 409, 'a used code is reported as used, not as unknown');
+  assert.match(again.data.error, /already used/);
   assert.match((await new Client().post('/register', { invite: nyxInvite, email: 'late@example.com', name: 'Late', password: 'password123' })).text, /Invalid or already used/);
   // Without a name, one is made up.
   const r2 = await register({ invite: await newInvite() });

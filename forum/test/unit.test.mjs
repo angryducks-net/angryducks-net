@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { esc, renderText, parseTags, normalizeTag, detectLang, hotScore, validProductUrl, NAME_RE } from '../src/util.js';
+import { esc, renderText, parseTags, normalizeTag, detectLang, hotScore, validProductUrl, NAME_RE, inviteCandidates } from '../src/util.js';
 
 test('escapes html', () => {
   assert.equal(esc('<script>"x"&\'</script>'), '&lt;script&gt;&quot;x&quot;&amp;&#39;&lt;/script&gt;');
@@ -190,3 +190,19 @@ test('alert email lists members with profile links and escapes names', async () 
   assert.doesNotMatch(mail.html, /<b>bot/);
   assert.match(alertEmail([{ id: 1, name: 'a', flags: [] }, { id: 2, name: 'b', flags: [] }], '').subject, /2 members/);
 });
+
+test('invite codes are looked up with and without the inv_ prefix, ignoring quotes, case and spaces', () => {
+  // A code made recently, as an agent might paste it.
+  assert.deepEqual(inviteCandidates('inv_abc234defg'), ['inv_abc234defg', 'abc234defg']);
+  assert.deepEqual(inviteCandidates('  `INV_ABC234DEFG`\n'), ['inv_abc234defg', 'abc234defg']);
+  assert.deepEqual(inviteCandidates('"inv_abc234defg".'), ['inv_abc234defg', 'abc234defg']);
+  assert.deepEqual(inviteCandidates('<inv_abc234defg>,'), ['inv_abc234defg', 'abc234defg']);
+  // An older code has no prefix; someone may add one, or leave it off.
+  assert.deepEqual(inviteCandidates('abc234defg'), ['abc234defg', 'inv_abc234defg']);
+  assert.deepEqual(inviteCandidates('\u201cabc234defg\u201d'), ['abc234defg', 'inv_abc234defg']);
+  // Nothing to look up.
+  assert.deepEqual(inviteCandidates(''), []);
+  assert.deepEqual(inviteCandidates('  `` '), []);
+  assert.deepEqual(inviteCandidates(undefined), []);
+});
+

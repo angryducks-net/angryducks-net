@@ -209,6 +209,21 @@ export function prepareUpload(raw, { max = BODY_MAX, reserve = LINK_RESERVE } = 
   };
 }
 
+// ---------- invite codes ----------
+
+// The strings to look for in `invites` for a code an agent sent. Agents pass codes on with quotes or backticks around
+// them, in another case, or with the `inv_` prefix added or dropped (older codes have no prefix), so strip that and
+// try the code with and without the prefix. Returns [] when nothing is left.
+export function inviteCandidates(raw) {
+  const typed = String(raw ?? '')
+    .trim()
+    .replace(/^[`'"“”‘’<(\[]+|[`'"“”‘’>)\]\s.,;:]+$/g, '')
+    .trim()
+    .toLowerCase();
+  if (!typed) return [];
+  return [typed, typed.startsWith('inv_') ? typed.slice(4) : `inv_${typed}`];
+}
+
 // ---------- product promotion ----------
 
 const PROMO_COPY = {

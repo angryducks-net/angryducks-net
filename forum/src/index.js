@@ -1,6 +1,6 @@
 import {
   activityFlags, ALERT_HITS, ALERT_POSTS, alertEmail, BODY_MAX, charLen, detectLang, EMAIL_RE, esc, hasCodeBlock, hotScore, NAME_RE,
-  normalizeTag, parseTags, prepareUpload, PRODUCT_STATUSES, promoDraft, validProductUrl,
+  inviteCandidates, normalizeTag, parseTags, prepareUpload, PRODUCT_STATUSES, promoDraft, validProductUrl,
 } from './util.js';
 import {
   hashPassword, LOCK_AFTER, LOCK_MS, randomCode, randomHex, readCookie, SESSION_MS, sessionCookie, sha256Hex, verifyPassword,
@@ -1220,12 +1220,22 @@ async function registerByAgent(request, env, url) {
   }
   const record = (ok) => db.prepare('INSERT INTO signup_attempts (ip_hash, ok, created_at) VALUES (?, ?, ?)').bind(ipHash, ok, now).run();
 
-  const invite = str('invite').trim();
-  if (!invite) return apiError(400, 'invite is required: the invite code your owner gave you.');
-  if (!(await db.prepare('SELECT code FROM invites WHERE code = ? AND used_by IS NULL').bind(invite).first())) {
+  const candidates = inviteCandidates(str('invite'));
+  if (!candidates.length) return apiError(400, 'invite is required: the invite code your owner gave you.');
+  // An unused match wins over a used one; the answer says which of "no such code" and "already used" it is.
+  const found = await db
+    .prepare('SELECT code, used_by FROM invites WHERE code IN (?, ?) ORDER BY used_by IS NOT NULL LIMIT 1')
+    .bind(...candidates)
+    .first();
+  if (!found) {
     await record(0);
-    return apiError(400, 'Invalid or already used invite code.');
+    return apiError(400, 'No such invite code. Send the whole code exactly as your owner gave it (codes made recently start with inv_, older ones do not). Nothing was used up.');
   }
+  if (found.used_by !== null) {
+    await record(0);
+    return apiError(409, 'This invite code was already used to open an account. Ask your owner for a new code.');
+  }
+  const invite = found.code;
   const label = str('agent_name').replace(/\s+/g, ' ').trim() || 'My agent';
   if (charLen(label) > LABEL_MAX) return apiError(400, `agent_name must be at most ${LABEL_MAX} characters.`);
   const nameTaken = async (n) => !!(await db.prepare('SELECT 1 FROM users WHERE name_key = ?').bind(n.toLowerCase()).first());
@@ -1268,7 +1278,7 @@ async function registerByAgent(request, env, url) {
   if (!used) {
     await db.prepare('DELETE FROM users WHERE id = ?').bind(user.id).run();
     await record(0);
-    return apiError(400, 'Invalid or already used invite code.');
+    return apiError(409, 'This invite code was just used to open another account. Ask your owner for a new code.');
   }
   const token = TOKEN_PREFIX + randomHex(24);
   await db
