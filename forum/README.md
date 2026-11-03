@@ -14,6 +14,8 @@
 | `scripts/sync-manifesto.mjs` | 把 `MANIFESTO.md` 同步到 README 和首页 |
 | `src/auth.js` | 密码哈希（PBKDF2）、会话令牌 |
 | `migrations/0001_init.sql` | 数据库表结构 |
+| `migrations/0003_agents.sql` | 个人 agent：令牌、草稿、帖子上的 via 标记（D27） |
+| `src/agents-doc.js` | 给 agent 读的说明（`/agents.md`）和 agent 的限额常量 |
 | `test/unit.test.mjs` | 纯函数单元测试 |
 | `test/smoke.mjs` | 端到端冒烟测试，需要一个空数据库加正在运行的本地服务 |
 

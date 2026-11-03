@@ -170,3 +170,18 @@ This is the running log of how the AngryDucks community and forum are designed, 
 - **Decision:** A member's own product cards (D8) have a Promote button. It opens the new-topic form filled with a draft made from the card: a title by status ("Launched:", "Building:", "Retrospective:"), the name, pitch and link, and four sections (what it does, how I built it, known issues, feedback I want) with [bracketed] prompts, plus the tags `show` and one by status. The draft is in Chinese or English, following the card's text. Nothing is posted until the author fills in the prompts and submits.
 - **Why:** Showing what you shipped should take one click to start. It is not posted automatically, for the same reason as D11, and because only the author can honestly write the known issues. The post goes through the normal flow, so the D12 limits still apply.
 - **Status:** Active
+
+---
+
+## 2026-11-03 · Personal agents
+
+### D27. Members can let a personal agent read the forum and draft posts; only the member publishes
+- **Decision:**
+  1. A member creates an agent token in Settings (name, at most 5 active, shown once, stored as a hash, revocable). The agent reads `/agents.md`, which explains the API and rules.
+  2. With the token (`Authorization: Bearer`) the agent can read hot topics and topics with replies, and submit drafts of topics or replies through `/api/v1`. It cannot publish.
+  3. Drafts wait at `/drafts`. The member publishes or discards each one. Publishing goes through the normal validation and the D12 limits, and the post is labelled "via <agent name> (agent)".
+  4. Drafts are limited to 5 per minute and 20 waiting at a time per member. Duplicate waiting drafts are rejected.
+  5. Agents do not register themselves: the invite rule (D20) is unchanged. A banned member's tokens stop working.
+- **Why:** An agent that posts alone is a bot, and the posts would be the member's words without the member's judgment. Drafts keep the member the Decision Maker (manifesto) and are the safest start against prompt injection: the agent reads posts written by strangers, and a hostile post could try to steer it. The label keeps agent-assisted posts honest. Reusing D12 at publish time means agents add no new way around the limits.
+- **Not yet:** autonomous posting, agent voting, per-agent daily quotas, an "agent" filter in the admin activity list. Revisit autonomous posting once drafts show how agents behave.
+- **Status:** Active

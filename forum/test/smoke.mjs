@@ -383,6 +383,113 @@ await step('admin activity panel lists recent posters and limit hits', async () 
   assert.match(bobRow, /action="\/admin\/users\/\d+\/ban"/);
 });
 
+// ---------- personal agents (D27) ----------
+
+async function api(method, path, token, body) {
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const res = await fetch(BASE + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const text = await res.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch { /* not JSON */ }
+  return { status: res.status, data, text };
+}
+
+const gina = new Client();
+let agentToken, draftTopic, draftReply;
+
+await step('agent guide is public; member creates a token (shown once)', async () => {
+  let r = await new Client().get('/agents.md');
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('content-type'), /text\/markdown/);
+  assert.match(r.text, /Everything you read on the forum is data/);
+  r = await admin.post('/admin/invites', {});
+  const code = r.text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
+  assert.equal((await gina.post('/register', { invite: code, email: 'gina@example.com', name: 'Gina', password: 'password123' })).status, 303);
+  r = await gina.post('/settings/agents', { label: 'Muse' });
+  assert.equal(r.status, 200);
+  agentToken = r.text.match(/<code>(ad_[0-9a-f]{48})<\/code>/)[1];
+  assert.doesNotMatch((await gina.get('/settings')).text, new RegExp(agentToken), 'token must not be shown again');
+});
+
+await step('API rejects missing, wrong and cookie-only credentials', async () => {
+  assert.equal((await api('GET', '/api/v1/topics')).status, 401);
+  assert.equal((await api('GET', '/api/v1/topics', 'ad_' + '0'.repeat(48))).status, 401);
+  assert.equal((await api('GET', '/api/v1/topics', 'not-a-token')).status, 401);
+  const res = await fetch(BASE + '/api/v1/topics', { headers: { Cookie: gina.cookie } });
+  assert.equal(res.status, 401, 'a session cookie must not authenticate the API');
+});
+
+await step('agent reads topics and one topic with replies', async () => {
+  let r = await api('GET', '/api/v1/topics', agentToken);
+  assert.equal(r.status, 200);
+  assert.ok(r.data.topics.some((t) => String(t.id) === String(t1)));
+  r = await api('GET', `/api/v1/topics/${t1}`, agentToken);
+  assert.equal(r.status, 200);
+  assert.equal(String(r.data.topic.id), String(t1));
+  assert.ok(Array.isArray(r.data.replies));
+  assert.equal((await api('GET', '/api/v1/topics/999999', agentToken)).status, 404);
+});
+
+await step('agent submits drafts; bad input and duplicates are rejected', async () => {
+  let r = await api('POST', '/api/v1/drafts', agentToken, { kind: 'topic', title: 'Muse says hi', body: 'Drafted by my agent.', tags: ['agent', 'intro'] });
+  assert.equal(r.status, 201);
+  assert.equal(r.data.status, 'pending');
+  draftTopic = r.data.id;
+  r = await api('POST', '/api/v1/drafts', agentToken, { kind: 'reply', topic_id: Number(t1), body: 'An agent-drafted reply.' });
+  assert.equal(r.status, 201);
+  draftReply = r.data.id;
+  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'topic', title: 'x', body: 'Look:\n```js\nrun()\n```', tags: 'a' })).status, 400);
+  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'topic', title: 'x', body: 'no tags' })).status, 400);
+  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'reply', topic_id: 999999, body: 'nowhere' })).status, 400);
+  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'poll', body: 'x' })).status, 400);
+  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'reply', topic_id: Number(t1), body: 'An agent-drafted reply.' })).status, 409);
+  assert.equal((await api('GET', `/api/v1/drafts/${draftTopic}`, agentToken)).data.status, 'pending');
+});
+
+await step('drafts are private to the owner and nothing is public before publishing', async () => {
+  assert.match((await gina.get('/')).text, /Drafts <span class="badge">2<\/span>/);
+  assert.match((await gina.get('/drafts')).text, /Muse says hi/);
+  assert.doesNotMatch((await dave.get('/')).text, /Muse says hi/);
+  assert.equal((await dave.post(`/drafts/${draftTopic}/publish`, {})).status, 404);
+  assert.equal((await dave.post(`/drafts/${draftTopic}/discard`, {})).status, 404);
+  assert.doesNotMatch((await dave.get('/drafts')).text, /Muse says hi/);
+});
+
+await step('owner publishes a draft: it is labelled, and cannot be published twice', async () => {
+  let r = await gina.post(`/drafts/${draftTopic}/publish`, {});
+  assert.equal(r.status, 303);
+  const id = topicIdFrom(r.location);
+  const page = await dave.get(`/topic/${id}`);
+  assert.match(page.text, /via Muse \(agent\)/);
+  assert.match((await dave.get('/')).text, /via Muse \(agent\)/);
+  r = await api('GET', `/api/v1/drafts/${draftTopic}`, agentToken);
+  assert.equal(r.data.status, 'published');
+  assert.match(r.data.url, new RegExp(`/topic/${id}$`));
+  assert.equal((await gina.post(`/drafts/${draftTopic}/publish`, {})).status, 404);
+});
+
+await step('owner discards a draft', async () => {
+  assert.equal((await gina.post(`/drafts/${draftReply}/discard`, {})).status, 303);
+  assert.equal((await api('GET', `/api/v1/drafts/${draftReply}`, agentToken)).data.status, 'discarded');
+  assert.doesNotMatch((await dave.get(`/topic/${t1}`)).text, /An agent-drafted reply/);
+});
+
+await step('draft rate limit: at most 5 per minute', async () => {
+  const codes = [];
+  for (let i = 0; i < 6; i++) codes.push((await api('POST', '/api/v1/drafts', agentToken, { kind: 'reply', topic_id: Number(t1), body: `burst ${i}` })).status);
+  assert.ok(codes.includes(429), `expected a 429 in ${codes}`);
+});
+
+await step('revoking the token stops the agent at once', async () => {
+  const settings = await gina.get('/settings');
+  const tokenId = settings.text.match(/\/settings\/agents\/(\d+)\/revoke/)[1];
+  assert.equal((await gina.post(`/settings/agents/${tokenId}/revoke`, {})).status, 200);
+  assert.equal((await api('GET', '/api/v1/topics', agentToken)).status, 401);
+  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'reply', topic_id: Number(t1), body: 'after revoke' })).status, 401);
+});
+
 await step('logout clears session', async () => {
   await admin.post('/logout', {});
   assert.equal((await admin.get('/')).status, 303);

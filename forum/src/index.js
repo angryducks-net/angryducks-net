@@ -1,10 +1,11 @@
 import {
   activityFlags, ALERT_HITS, ALERT_POSTS, alertEmail, BODY_MAX, charLen, detectLang, EMAIL_RE, esc, hasCodeBlock, hotScore, NAME_RE,
-  parseTags, prepareUpload, PRODUCT_STATUSES, promoDraft, validProductUrl,
+  normalizeTag, parseTags, prepareUpload, PRODUCT_STATUSES, promoDraft, validProductUrl,
 } from './util.js';
 import {
   hashPassword, LOCK_AFTER, LOCK_MS, randomCode, randomHex, readCookie, SESSION_MS, sessionCookie, sha256Hex, verifyPassword,
 } from './auth.js';
+import { agentsGuide, DRAFTS_PER_MIN, LABEL_MAX, MAX_PENDING_DRAFTS, MAX_TOKENS, TOKEN_PREFIX } from './agents-doc.js';
 import * as V from './views.js';
 import { renderMarkdown, excerpt } from './markdown.js';
 import { MANIFESTO_MD } from './manifesto.generated.js';
@@ -61,7 +62,8 @@ function redirect(location, extra = {}) {
 
 async function page(ctx, title, body, status = 200) {
   const unread = ctx.user ? await unreadTopics(ctx.db, ctx.user.id).then((r) => r.length) : 0;
-  return html(V.layout({ title, user: ctx.user, unread, body }), status);
+  const drafts = ctx.user ? await pendingDraftCount(ctx.db, ctx.user.id) : 0;
+  return html(V.layout({ title, user: ctx.user, unread, drafts, body }), status);
 }
 
 function message(ctx, title, text, status) {
@@ -116,6 +118,8 @@ async function handle(request, env) {
   const url = new URL(request.url);
   const homeHosts = (env.HOME_HOSTS || DEFAULT_HOME_HOSTS).split(',').map((h) => h.trim());
   if (homeHosts.includes(url.hostname)) return handleHome(request, env, url);
+  // Agent API: bearer token, no cookies, so the same-origin check below does not apply.
+  if (url.pathname.startsWith('/api/')) return handleApi(request, env, url);
   const method = request.method === 'HEAD' ? 'GET' : request.method;
   if (method === 'POST' && !sameOrigin(request, url)) {
     return new Response('Cross-origin request blocked.', { status: 403 });
@@ -263,7 +267,7 @@ async function setTags(db, contentId, tags) {
 async function hotTopics(db, tag) {
   const filter = tag ? 'AND c.id IN (SELECT ct.content_id FROM content_tags ct JOIN tags g ON g.id = ct.tag_id WHERE g.name = ?)' : '';
   const stmt = db.prepare(
-    `SELECT c.id, c.title, c.lang, c.author_id, c.created_at, u.name AS author_name,
+    `SELECT c.id, c.title, c.lang, c.author_id, c.created_at, c.via_agent, u.name AS author_name,
        substr(c.body, 1, 600) AS body_head,
        (SELECT COUNT(*) FROM votes v WHERE v.content_id = c.id AND ${notBanned('v.user_id')}) AS votes,
        (SELECT COUNT(*) FROM content r WHERE r.topic_id = c.id AND r.deleted_at IS NULL AND ${notBanned('r.author_id')}) AS replies,
@@ -675,12 +679,20 @@ route('POST', '/products/(\\d+)/delete', async (ctx, id) => {
 
 // ---------- settings ----------
 
-route('GET', '/settings', (ctx) => page(ctx, 'Settings', V.settingsBody({ user: ctx.user })));
+async function settingsPage(ctx, opts = {}, status = 200) {
+  const { results: tokens } = await ctx.db
+    .prepare('SELECT id, label, created_at, last_used_at, revoked_at FROM agent_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT 50')
+    .bind(ctx.user.id)
+    .all();
+  return page(ctx, 'Settings', V.settingsBody({ user: ctx.user, tokens, ...opts }), status);
+}
+
+route('GET', '/settings', (ctx) => settingsPage(ctx));
 
 route('POST', '/settings', async (ctx) => {
   const get = await form(ctx.request);
   const values = { name: get('name').trim(), bio: get('bio').trim() };
-  const fail = (error) => page(ctx, 'Settings', V.settingsBody({ user: ctx.user, error, values }), 400);
+  const fail = (error) => settingsPage(ctx, { error, values }, 400);
   if (!NAME_RE.test(values.name)) return fail('Display name must be 2–24 letters, numbers, - or _.');
   if (charLen(values.bio) > 160) return fail('Bio must be at most 160 characters.');
   const taken = await ctx.db.prepare('SELECT 1 FROM users WHERE name_key = ? AND id != ?').bind(values.name.toLowerCase(), ctx.user.id).first();
@@ -690,12 +702,12 @@ route('POST', '/settings', async (ctx) => {
     .bind(values.name, values.name.toLowerCase(), values.bio, ctx.user.id)
     .run();
   ctx.user = { ...ctx.user, ...values };
-  return page(ctx, 'Settings', V.settingsBody({ user: ctx.user, notice: 'Profile saved.' }));
+  return settingsPage(ctx, { notice: 'Profile saved.' });
 });
 
 route('POST', '/settings/password', async (ctx) => {
   const get = await form(ctx.request);
-  const fail = (error) => page(ctx, 'Settings', V.settingsBody({ user: ctx.user, error }), 400);
+  const fail = (error) => settingsPage(ctx, { error }, 400);
   const row = await ctx.db.prepare('SELECT pw_hash, pw_salt FROM users WHERE id = ?').bind(ctx.user.id).first();
   if (!(await verifyPassword(get('current'), row.pw_hash, row.pw_salt))) return fail('Current password is wrong.');
   const next = get('password');
@@ -707,6 +719,245 @@ route('POST', '/settings/password', async (ctx) => {
   ]);
   return startSession(ctx, ctx.user.id, '/settings');
 });
+
+// ---------- agents (D27) ----------
+// A member gives their personal agent a token. The agent can read the forum and submit drafts;
+// only the member can publish them. Published posts carry a "via <agent>" label.
+
+async function pendingDraftCount(db, userId) {
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM agent_drafts WHERE user_id = ? AND status = 'pending'").bind(userId).first();
+  return row.n;
+}
+
+route('GET', '/agents\\.md', (ctx) =>
+  new Response(agentsGuide(ctx.url.origin), { headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'X-Content-Type-Options': 'nosniff' } }),
+  { open: true });
+
+route('POST', '/settings/agents', async (ctx) => {
+  const get = await form(ctx.request);
+  const label = get('label').replace(/\s+/g, ' ').trim();
+  if (!label || charLen(label) > LABEL_MAX) {
+    return settingsPage(ctx, { error: `Agent name is required and must be at most ${LABEL_MAX} characters.` }, 400);
+  }
+  const { n } = await ctx.db.prepare('SELECT COUNT(*) AS n FROM agent_tokens WHERE user_id = ? AND revoked_at IS NULL').bind(ctx.user.id).first();
+  if (n >= MAX_TOKENS) return settingsPage(ctx, { error: `You can have at most ${MAX_TOKENS} active tokens. Revoke one first.` }, 400);
+  const token = TOKEN_PREFIX + randomHex(24);
+  await ctx.db
+    .prepare('INSERT INTO agent_tokens (user_id, label, token_hash, created_at) VALUES (?, ?, ?, ?)')
+    .bind(ctx.user.id, label, await sha256Hex(token), Date.now())
+    .run();
+  return settingsPage(ctx, { newToken: { label, token } });
+});
+
+route('POST', '/settings/agents/(\\d+)/revoke', async (ctx, id) => {
+  await ctx.db
+    .prepare('UPDATE agent_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL')
+    .bind(Date.now(), Number(id), ctx.user.id)
+    .run();
+  return settingsPage(ctx, { notice: 'Token revoked. That agent can no longer use the forum.' });
+});
+
+route('GET', '/drafts', async (ctx) => {
+  const { results } = await ctx.db
+    .prepare(
+      `SELECT d.*, t.label AS agent, tp.title AS topic_title FROM agent_drafts d
+       JOIN agent_tokens t ON t.id = d.token_id LEFT JOIN content tp ON tp.id = d.topic_id
+       WHERE d.user_id = ? AND d.status = 'pending' ORDER BY d.created_at, d.id`,
+    )
+    .bind(ctx.user.id)
+    .all();
+  return page(ctx, 'Agent drafts', V.draftsBody({ drafts: results }));
+});
+
+async function ownDraft(ctx, id) {
+  const d = await ctx.db
+    .prepare('SELECT d.*, t.label AS agent FROM agent_drafts d JOIN agent_tokens t ON t.id = d.token_id WHERE d.id = ?')
+    .bind(Number(id))
+    .first();
+  if (!d || d.user_id !== ctx.user.id || d.status !== 'pending') return { res: await message(ctx, 'Not found', 'This draft does not exist or was already handled.', 404) };
+  return { d };
+}
+
+route('POST', '/drafts/(\\d+)/publish', async (ctx, id) => {
+  const { d, res } = await ownDraft(ctx, id);
+  if (res) return res;
+  // Re-validate: rules may have changed, and a reply's topic may be gone since the agent drafted it.
+  let v;
+  let topic = null;
+  if (d.kind === 'topic') {
+    const fields = { title: d.title ?? '', body: d.body, tags: d.tags };
+    v = validateTopic((key) => fields[key] ?? '');
+    if (!v.error) v = { ...v, body: v.values.body };
+  } else {
+    topic = await getContent(ctx.db, d.topic_id);
+    if (!visibleTo(ctx.user, topic) || topic.kind !== 'topic' || topic.deleted_at) {
+      return message(ctx, 'Cannot publish', 'The topic this reply was written for no longer exists. Discard the draft.', 400);
+    }
+    v = validateBody(d.body);
+  }
+  if (v.error) return message(ctx, 'Cannot publish', `${v.error} Discard this draft.`, 400);
+  const flood = await floodCheck(ctx, v.body);
+  if (flood) return flood;
+  const now = Date.now();
+  // Claim the draft first so a double click cannot publish it twice.
+  const claimed = await ctx.db
+    .prepare("UPDATE agent_drafts SET status = 'published', decided_at = ? WHERE id = ? AND status = 'pending' RETURNING id")
+    .bind(now, d.id)
+    .first();
+  if (!claimed) return message(ctx, 'Already handled', 'This draft was already published or discarded.', 409);
+  let row;
+  if (d.kind === 'topic') {
+    row = await ctx.db
+      .prepare("INSERT INTO content (kind, author_id, title, body, lang, created_at, via_agent) VALUES ('topic', ?, ?, ?, ?, ?, ?) RETURNING id")
+      .bind(ctx.user.id, v.values.title, v.body, detectLang(v.values.title, v.body), now, d.agent)
+      .first();
+    await setTags(ctx.db, row.id, v.tags);
+    await markRead(ctx.db, ctx.user.id, row.id);
+  } else {
+    row = await ctx.db
+      .prepare("INSERT INTO content (kind, topic_id, author_id, body, lang, created_at, via_agent) VALUES ('reply', ?, ?, ?, ?, ?, ?) RETURNING id")
+      .bind(topic.id, ctx.user.id, v.body, detectLang(v.body), now, d.agent)
+      .first();
+    await markRead(ctx.db, ctx.user.id, topic.id);
+  }
+  await ctx.db.prepare('UPDATE agent_drafts SET content_id = ? WHERE id = ?').bind(row.id, d.id).run();
+  return redirect(d.kind === 'topic' ? `/topic/${row.id}` : `/topic/${topic.id}#c${row.id}`);
+});
+
+route('POST', '/drafts/(\\d+)/discard', async (ctx, id) => {
+  const { d, res } = await ownDraft(ctx, id);
+  if (res) return res;
+  await ctx.db.prepare("UPDATE agent_drafts SET status = 'discarded', decided_at = ? WHERE id = ? AND status = 'pending'").bind(Date.now(), d.id).run();
+  return redirect('/drafts');
+});
+
+// ----- JSON API for agents: Authorization: Bearer ad_... (see /agents.md) -----
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
+  });
+}
+const apiError = (status, error) => json({ error }, status);
+const API_BODY_MAX = 65_536;
+
+async function handleApi(request, env, url) {
+  const db = env.DB;
+  const bearer = (request.headers.get('Authorization') || '').match(/^Bearer\s+(\S+)$/i);
+  if (!bearer || !bearer[1].startsWith(TOKEN_PREFIX)) return apiError(401, 'Missing or invalid token. Send "Authorization: Bearer ad_...".');
+  const agent = await db
+    .prepare(
+      `SELECT t.id AS token_id, t.label, u.id AS user_id FROM agent_tokens t JOIN users u ON u.id = t.user_id
+       WHERE t.token_hash = ? AND t.revoked_at IS NULL AND u.banned_at IS NULL`,
+    )
+    .bind(await sha256Hex(bearer[1]))
+    .first();
+  if (!agent) return apiError(401, 'This token is invalid or was revoked.');
+  const now = Date.now();
+  await db
+    .prepare('UPDATE agent_tokens SET last_used_at = ? WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)')
+    .bind(now, agent.token_id, now - 60_000)
+    .run();
+
+  const path = url.pathname.replace(/\/+$/, '');
+  const method = request.method;
+  let m;
+  if (method === 'GET' && path === '/api/v1/topics') {
+    const tag = normalizeTag(url.searchParams.get('tag') || '');
+    const topics = await hotTopics(db, tag || undefined);
+    return json({
+      topics: topics.map((t) => ({
+        id: t.id, title: t.title, excerpt: t.excerpt, tags: t.tags, author: t.author_name, votes: t.votes, replies: t.replies,
+        created_at: t.created_at, url: `${url.origin}/topic/${t.id}`,
+      })),
+    });
+  }
+  if (method === 'GET' && (m = path.match(/^\/api\/v1\/topics\/(\d+)$/))) {
+    const topic = await getContent(db, m[1]);
+    if (!topic || topic.kind !== 'topic' || topic.deleted_at || topic.author_banned_at) return apiError(404, 'Topic not found.');
+    const [tags, { results: replies }] = await Promise.all([
+      tagsFor(db, [topic.id]),
+      db
+        .prepare(
+          `SELECT c.id, c.body, c.created_at, u.name AS author FROM content c JOIN users u ON u.id = c.author_id
+           WHERE c.topic_id = ? AND c.deleted_at IS NULL AND u.banned_at IS NULL ORDER BY c.created_at, c.id LIMIT 200`,
+        )
+        .bind(topic.id)
+        .all(),
+    ]);
+    return json({
+      topic: {
+        id: topic.id, title: topic.title, body: topic.body, tags: tags.get(topic.id), author: topic.author_name,
+        created_at: topic.created_at, url: `${url.origin}/topic/${topic.id}`,
+      },
+      replies,
+    });
+  }
+  if (method === 'POST' && path === '/api/v1/drafts') return createDraft(request, db, url, agent, now);
+  if (method === 'GET' && (m = path.match(/^\/api\/v1\/drafts\/(\d+)$/))) {
+    const d = await db
+      .prepare('SELECT id, kind, status, topic_id, content_id FROM agent_drafts WHERE id = ? AND user_id = ?')
+      .bind(Number(m[1]), agent.user_id)
+      .first();
+    if (!d) return apiError(404, 'Draft not found.');
+    const published = d.status === 'published' && d.content_id;
+    const link = !published ? undefined : d.kind === 'topic' ? `${url.origin}/topic/${d.content_id}` : `${url.origin}/topic/${d.topic_id}#c${d.content_id}`;
+    return json({ id: d.id, status: d.status, url: link });
+  }
+  return apiError(404, 'Unknown endpoint. See /agents.md.');
+}
+
+async function createDraft(request, db, url, agent, now) {
+  const text = await request.text();
+  if (text.length > API_BODY_MAX) return apiError(413, 'Request body is too large.');
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return apiError(400, 'Body must be JSON.');
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return apiError(400, 'Body must be a JSON object.');
+  const str = (key) => (typeof data[key] === 'string' ? data[key] : '');
+  const tagsIn = Array.isArray(data.tags) ? data.tags.filter((t) => typeof t === 'string').join(',') : str('tags');
+
+  let draft;
+  if (data.kind === 'topic') {
+    const v = validateTopic((key) => (key === 'tags' ? tagsIn : str(key)));
+    if (v.error) return apiError(400, v.error);
+    draft = { kind: 'topic', topicId: null, title: v.values.title, body: v.values.body, tags: v.tags.join(',') };
+  } else if (data.kind === 'reply') {
+    const topic = Number.isInteger(data.topic_id) ? await getContent(db, data.topic_id) : null;
+    if (!topic || topic.kind !== 'topic' || topic.deleted_at || topic.author_banned_at) return apiError(400, 'topic_id must be the id of an existing topic.');
+    const v = validateBody(str('body'));
+    if (v.error) return apiError(400, v.error);
+    draft = { kind: 'reply', topicId: topic.id, title: null, body: v.body, tags: '' };
+  } else {
+    return apiError(400, 'kind must be "topic" or "reply".');
+  }
+
+  const row = await db
+    .prepare(
+      `SELECT COALESCE(SUM(status = 'pending'), 0) AS pending, COALESCE(SUM(created_at > ?1), 0) AS last_min,
+         COALESCE(SUM(status = 'pending' AND body = ?3), 0) AS dupes
+       FROM agent_drafts WHERE user_id = ?2 AND (status = 'pending' OR created_at > ?1)`,
+    )
+    .bind(now - 60_000, agent.user_id, draft.body)
+    .first();
+  if (row.dupes > 0) return apiError(409, 'You already submitted this text and it is waiting for review.');
+  if (row.last_min >= DRAFTS_PER_MIN) return apiError(429, `At most ${DRAFTS_PER_MIN} drafts per minute. Wait before sending more.`);
+  if (row.pending >= MAX_PENDING_DRAFTS) {
+    return apiError(429, `${MAX_PENDING_DRAFTS} drafts are already waiting for your owner's review. Wait until they are handled.`);
+  }
+  const { id } = await db
+    .prepare(
+      `INSERT INTO agent_drafts (user_id, token_id, kind, topic_id, title, body, tags, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    )
+    .bind(agent.user_id, agent.token_id, draft.kind, draft.topicId, draft.title, draft.body, draft.tags, now)
+    .first();
+  return json({ id, status: 'pending', review_url: `${url.origin}/drafts` }, 201);
+}
 
 // ---------- admin ----------
 

@@ -90,6 +90,8 @@ footer{max-width:820px;margin:0 auto;padding:24px 16px 40px;border-top:1px solid
 .rules{background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px;color:#45454d}
 .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 input[type=file]{padding:6px;width:auto;max-width:100%}
+.via{display:inline-block;font-size:12px;border:1px solid var(--line);background:var(--soft);border-radius:6px;padding:0 6px;color:var(--muted)}
+.draft{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:0 0 14px;background:var(--soft)}
 `;
 
 function langAttr(lang) {
@@ -113,12 +115,17 @@ function errorBox(error) {
   return error ? `<p class="err" role="alert">${esc(error)}</p>` : '';
 }
 
-export function layout({ title, user, unread = 0, body }) {
+function viaTag(c) {
+  return c.via_agent ? ` <span class="via" translate="no">via ${esc(c.via_agent)} (agent)</span>` : '';
+}
+
+export function layout({ title, user, unread = 0, drafts = 0, body }) {
   const nav = user
     ? `<nav>
         <a href="/">Home</a>
         <a href="/new">New topic</a>
         <a href="/notifications">Replies${unread ? ` <span class="badge">${unread}</span>` : ''}</a>
+        ${drafts ? `<a href="/drafts">Drafts <span class="badge">${drafts}</span></a>` : ''}
         <a href="/u/${user.id}" translate="no">${esc(user.name)}</a>
         <a href="/settings">Settings</a>
         ${user.is_admin ? '<a href="/admin">Admin</a>' : ''}
@@ -180,7 +187,7 @@ export function topicListBody({ topics, tags, activeTag }) {
   <a class="title" href="/topic/${t.id}"${langAttr(t.lang)} dir="auto">${esc(t.title)}</a>
   ${t.excerpt ? `<p class="excerpt"${langAttr(t.lang)} dir="auto">${esc(t.excerpt)}</p>` : ''}
   <div class="tags">${t.tags.map((g) => tagLink(g)).join('')}</div>
-  <div class="muted">${userLink(t.author_id, t.author_name)} · ${relTime(t.created_at)} · ${t.votes} vote${t.votes === 1 ? '' : 's'} · ${t.replies} repl${t.replies === 1 ? 'y' : 'ies'}</div>
+  <div class="muted">${userLink(t.author_id, t.author_name)}${viaTag(t)} · ${relTime(t.created_at)} · ${t.votes} vote${t.votes === 1 ? '' : 's'} · ${t.replies} repl${t.replies === 1 ? 'y' : 'ies'}</div>
 </li>`,
         )
         .join('')}</ul>`
@@ -207,7 +214,7 @@ export function topicBody({ topic, tags, replies, votes, voted, user, error, dra
         ? `<span class="muted">${votes} vote${votes === 1 ? '' : 's'}</span>`
         : `<form class="vote" method="post" action="/topic/${topic.id}/vote"><button class="ghost">${voted ? '▲ Voted' : '▲ Vote'}</button><span class="muted">${votes}</span></form>`;
   const post = (c, isTopic) => `<article class="post" id="c${c.id}">
-  <div class="meta muted">${avatar(c.author_name)} ${userLink(c.author_id, c.author_name)} · ${relTime(c.created_at)}${c.edited_at && !c.deleted_at ? ' · edited' : ''}${c.author_banned_at ? ' <span class="flag">Hidden: author banned</span>' : ''} ${contentActions(c, user)}</div>
+  <div class="meta muted">${avatar(c.author_name)} ${userLink(c.author_id, c.author_name)}${viaTag(c)} · ${relTime(c.created_at)}${c.edited_at && !c.deleted_at ? ' · edited' : ''}${c.author_banned_at ? ' <span class="flag">Hidden: author banned</span>' : ''} ${contentActions(c, user)}</div>
   ${c.deleted_at ? '<p class="deleted">[deleted]</p>' : `<div class="md"${langAttr(c.lang)} dir="auto">${renderMarkdown(c.body)}</div>`}
   ${isTopic ? `<div class="tags">${tags.map((t) => tagLink(t)).join('')}</div>${voteForm}` : ''}
 </article>`;
@@ -297,7 +304,50 @@ export function productEditBody({ product, error, values }) {
 <form class="stack" method="post" action="/products/${product.id}/edit">${productFields(values || product)}<button>Save</button></form>`;
 }
 
-export function settingsBody({ user, error, notice, values = {} }) {
+function agentsSection(tokens, newToken) {
+  const created = newToken
+    ? `<div class="ok" role="status"><p>Token for <b translate="no">${esc(newToken.label)}</b>. Copy it now; it is shown only once.</p><p><code>${esc(newToken.token)}</code></p>
+<p>Give your agent this token and the link <code>/agents.md</code> (on this site). That page explains everything.</p></div>`
+    : '';
+  const rows = tokens
+    .map(
+      (t) => `<tr><td translate="no">${esc(t.label)}</td><td>${relTime(t.created_at)}</td><td>${t.last_used_at ? relTime(t.last_used_at) : '<span class="muted">never</span>'}</td><td>${
+        t.revoked_at
+          ? '<span class="muted">revoked</span>'
+          : `<form class="inline" method="post" action="/settings/agents/${t.id}/revoke"><button class="ghost">Revoke</button></form>`
+      }</td></tr>`,
+    )
+    .join('');
+  return `<h2>Your agent</h2>
+<p class="muted">Let your personal agent (Muse or any other) read the forum and draft posts for you. It cannot publish: every draft waits for you at <a href="/drafts">Drafts</a>. Posts you publish from a draft are labelled "via &lt;agent name&gt;". Give your agent <a href="/agents.md">/agents.md</a> and a token.</p>
+${created}
+<form class="stack" method="post" action="/settings/agents">
+  <label>Agent name <span class="hint">Shown on posts, for example "Muse".</span><input name="label" required maxlength="40"></label>
+  <button>Create token</button>
+</form>
+${tokens.length ? `<table><tr><th>Agent</th><th>Created</th><th>Last used</th><th></th></tr>${rows}</table>` : ''}`;
+}
+
+export function draftsBody({ drafts }) {
+  const items = drafts
+    .map(
+      (d) => `<article class="draft">
+  <div class="muted"><span class="via" translate="no">${esc(d.agent)} (agent)</span> drafted ${d.kind === 'topic' ? 'a new topic' : `a reply to <a href="/topic/${d.topic_id}">${esc(d.topic_title || 'a topic')}</a>`} · ${relTime(d.created_at)}</div>
+  ${d.kind === 'topic' ? `<h3 dir="auto">${esc(d.title)}</h3><div class="tags">${d.tags.split(',').filter(Boolean).map((t) => tagLink(t)).join('')}</div>` : ''}
+  <div class="md" dir="auto">${renderMarkdown(d.body)}</div>
+  <div class="row" style="margin-top:10px">
+    <form class="inline" method="post" action="/drafts/${d.id}/publish"><button>Publish as me</button></form>
+    <form class="inline" method="post" action="/drafts/${d.id}/discard"><button class="ghost">Discard</button></form>
+  </div>
+</article>`,
+    )
+    .join('');
+  return `<h1>Agent drafts</h1>
+<p class="muted">Posts your agents prepared for you. Nothing is public until you publish it. You can edit a post after publishing. <a href="/settings">Manage agents</a></p>
+${items || '<p class="muted">No drafts waiting.</p>'}`;
+}
+
+export function settingsBody({ user, error, notice, values = {}, tokens = [], newToken = null }) {
   return `<h1>Settings</h1>${errorBox(error)}${notice ? `<p class="ok">${esc(notice)}</p>` : ''}
 <form class="stack" method="post" action="/settings">
   <label>Display name<input name="name" required maxlength="24" value="${esc(values.name ?? user.name)}"></label>
@@ -310,6 +360,7 @@ export function settingsBody({ user, error, notice, values = {} }) {
   <label>New password <span class="hint">At least 8 characters.</span><input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
   <button>Change password</button>
 </form>
+${agentsSection(tokens, newToken)}
 <p class="muted">Email: ${esc(user.email)}</p>`;
 }
 
