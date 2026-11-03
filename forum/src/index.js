@@ -263,7 +263,7 @@ async function getContent(db, id) {
 // ---------- validation ----------
 
 const CODE_ERROR = "Code blocks aren't shared here. Put the code in your repo or doc and link to it.";
-const LENGTH_ERROR = `Posts are limited to ${BODY_MAX} characters. For longer writing, post a summary and link to the full version.`;
+const LENGTH_ERROR = `Posts are limited to ${BODY_MAX} characters. For longer writing, post a summary and link to the full article (Substack, your blog, a GitHub repo...).`;
 
 function bodyError(body) {
   if (!body) return 'Write something first.';
@@ -412,7 +412,7 @@ async function loadUpload(ctx, get) {
   const notes = [];
   if (prepared.shortened) notes.push(`The file is longer than ${BODY_MAX} characters, so only the beginning was kept.`);
   if (prepared.codeRemoved) notes.push('Code blocks were removed.');
-  if (notes.length) notes.push('Edit it into a short summary and paste the link to the full document after "Full version:".');
+  if (notes.length) notes.push('Edit it into a short summary and paste the link to the full article (Substack, your blog, a GitHub repo...) after "Full version:".');
   return newTopicForm(ctx, {
     values: { title: values.title || prepared.title, body: prepared.body, tags: values.tags },
     notice: notes.length ? notes.join(' ') : 'File loaded. Review it, add tags, then post.',

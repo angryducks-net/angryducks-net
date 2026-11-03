@@ -114,7 +114,7 @@ test('prepares uploads: heading to title, short files untouched', () => {
 });
 
 test('prepares uploads: long files are cut and leave room for the link', () => {
-  const long = Array.from({ length: 30 }, (_, i) => `Paragraph ${i} ` + 'x'.repeat(60)).join('\n\n');
+  const long = Array.from({ length: 120 }, (_, i) => `Paragraph ${i} ` + 'x'.repeat(60)).join('\n\n');
   const r = prepareUpload(`# Doc\n\n${long}`);
   assert.equal(r.shortened, true);
   assert.ok(r.body.endsWith('\n\nFull version: '));

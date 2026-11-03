@@ -133,7 +133,7 @@ export const PRODUCT_STATUSES = ['building', 'live', 'stopped'];
 // ---------- post bodies ----------
 
 // One limit for topics and replies, counted in characters (code points).
-export const BODY_MAX = 1000;
+export const BODY_MAX = 6000;
 // Room kept free after truncating an upload so the author can paste the full-version link.
 export const LINK_RESERVE = 120;
 export const FULL_VERSION_LABEL = 'Full version: ';

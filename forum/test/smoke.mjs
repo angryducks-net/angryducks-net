@@ -220,13 +220,13 @@ await step('only the author can edit; edit marks "edited" and replaces tags', as
   assert.ok(r.text.includes('#design') && !r.text.includes('#vibe-coding'));
 });
 
-await step('body limit is 1000 characters for topics and replies', async () => {
-  let r = await dave.post('/new', { title: 'Long', body: 'x'.repeat(1001), tags: 'limits' });
+await step('body limit is 6000 characters for topics and replies', async () => {
+  let r = await dave.post('/new', { title: 'Long', body: 'x'.repeat(6001), tags: 'limits' });
   assert.equal(r.status, 400);
-  assert.match(r.text, /limited to 1000 characters/);
-  r = await dave.post(`/topic/${t2}/reply`, { body: '字'.repeat(1001) });
+  assert.match(r.text, /limited to 6000 characters/);
+  r = await dave.post(`/topic/${t2}/reply`, { body: '字'.repeat(6001) });
   assert.equal(r.status, 400);
-  r = await dave.post(`/topic/${t2}/reply`, { body: '字'.repeat(1000) });
+  r = await dave.post(`/topic/${t2}/reply`, { body: '字'.repeat(6000) });
   assert.equal(r.status, 303);
 });
 
@@ -254,7 +254,7 @@ await step('posts render as Markdown; images show as text links', async () => {
 
 await step('uploading a long .md fills the form for review and does not post', async () => {
   const before = (await dave.get('/')).text.match(/\/topic\/\d+"/g).length;
-  const doc = '# Launch notes\n\n' + Array.from({ length: 20 }, (_, i) => `Part ${i}. ` + 'word '.repeat(20)).join('\n\n') + '\n\n```sh\nrm -rf /\n```\n';
+  const doc = '# Launch notes\n\n' + Array.from({ length: 80 }, (_, i) => `Part ${i}. ` + 'word '.repeat(20)).join('\n\n') + '\n\n```sh\nrm -rf /\n```\n';
   const fd = new FormData();
   fd.set('title', '');
   fd.set('body', '');

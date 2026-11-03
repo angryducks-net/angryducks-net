@@ -206,7 +206,7 @@ ${replies.map((r) => post(r, false)).join('')}
 ${replyForm}`;
 }
 
-const RULES = `<p class="rules">Posts are short: up to ${BODY_MAX} characters. For longer writing, post a summary and link to the full version. Don't share code or images here; link to your repo or document instead.</p>`;
+const RULES = `<p class="rules">Posts are kept focused: up to ${BODY_MAX} characters. For longer writing, post a summary and link to the full article (Substack, your blog, a GitHub repo...). Don't share code or images here; link to your repo or document instead.</p>`;
 
 export function topicFormBody({ action, heading, values = {}, error, notice, isTopic = true, upload = false }) {
   const uploadRow = upload

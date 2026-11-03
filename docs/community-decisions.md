@@ -54,7 +54,7 @@ This is the running log of how the AngryDucks community and forum are designed, 
 ### D9. Short posts only: 1000 characters
 - **Decision:** Topics and replies share one limit of 1000 characters, counted simply as characters in any language.
 - **Why:** The forum is for focused discussion. Long writing lives elsewhere: post a short summary and link to the full version.
-- **Status:** Active
+- **Status:** Replaced by D19
 
 ### D10. Markdown, but no code blocks and no images
 - **Decision:** Posts render as Markdown: paragraphs, line breaks, lists, bold, links, quotes, headings, tables, and inline code. Raw HTML is shown as text. Fenced code blocks are rejected. Images are never displayed anywhere; image syntax becomes a text link.
@@ -98,3 +98,12 @@ This is the running log of how the AngryDucks community and forum are designed, 
 ### D18. Deploys stay manual for now
 - **Decision:** Deploying on every push to `main` is postponed until the merge rules in D17 are in place.
 - **Status:** Deferred
+
+---
+
+## 2026-11-03 · Post length
+
+### D19. Posts up to 6000 characters; longer articles are linked
+- **Decision:** Topics and replies share one limit of 6000 characters (was 1000 in D9), still counted simply as characters in any language. Anything longer is published elsewhere, such as Substack, a personal blog, or a GitHub repository, and the post carries a summary plus the link. The posting rules, the over-limit error, and the `.md` upload notice all suggest this.
+- **Why:** 1000 characters was too tight for real content. The AngryDucks manifesto (about 2800 characters) was cut to its first two sections on upload. 6000 fits a full essay of that size, while very long writing still belongs on a platform built for it.
+- **Status:** Active
