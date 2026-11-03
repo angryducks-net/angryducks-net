@@ -1,6 +1,6 @@
 import {
-  BODY_MAX, charLen, detectLang, EMAIL_RE, esc, hasCodeBlock, hotScore, NAME_RE, parseTags, prepareUpload, PRODUCT_STATUSES,
-  promoDraft, validProductUrl,
+  activityFlags, ALERT_HITS, ALERT_POSTS, alertEmail, BODY_MAX, charLen, detectLang, EMAIL_RE, esc, hasCodeBlock, hotScore, NAME_RE,
+  parseTags, prepareUpload, PRODUCT_STATUSES, promoDraft, validProductUrl,
 } from './util.js';
 import {
   hashPassword, LOCK_AFTER, LOCK_MS, randomCode, randomHex, readCookie, SESSION_MS, sessionCookie, sha256Hex, verifyPassword,
@@ -22,6 +22,9 @@ const SCAN_LIMIT = 500; // newest topics considered for hot ranking
 const DEFAULT_HOME_HOSTS = 'angryducks.net,www.angryducks.net';
 const DEFAULT_FORUM_ORIGIN = 'https://community.angryducks.net';
 const REPO_URL = 'https://github.com/angryducks-net/angryducks-net';
+// Alert emails: sender must be on the domain onboarded to Cloudflare Email Sending; recipient is the ALERT_TO secret.
+const DEFAULT_ALERT_FROM = 'alerts@angryducks.net';
+const DAY_MS = 86_400_000;
 const MANIFESTO_HTML = renderMarkdown(MANIFESTO_MD);
 
 const SECURITY_HEADERS = {
@@ -39,6 +42,10 @@ export default {
       console.error(err);
       return html(V.layout({ title: 'Error', body: V.messageBody('Something broke', 'Please try again.') }), 500);
     }
+  },
+  // Cron trigger (wrangler.toml): email admins about members whose posting looks like a bot.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(sendAlerts(env).catch((err) => console.error('alerts failed', err)));
   },
 };
 
@@ -173,19 +180,29 @@ async function floodCheck(ctx, body) {
          SUM(body = ?3 AND deleted_at IS NULL) AS dupes
        FROM content WHERE author_id = ?1 AND created_at > ?4`,
     )
-    .bind(ctx.user.id, now - 60_000, body, now - 86_400_000)
+    .bind(ctx.user.id, now - 60_000, body, now - DAY_MS)
     .first();
+  // Every rejection is recorded: repeatedly hitting the limits is the clearest sign of a script.
+  const hit = (reason) =>
+    ctx.db.prepare('INSERT INTO flood_hits (user_id, reason, created_at) VALUES (?, ?, ?)').bind(ctx.user.id, reason, now).run();
   if ((row.last_min || 0) >= perMin) {
+    await hit('minute');
     return message(ctx, 'Slow down', `You can post up to ${perMin} times per minute. Wait a moment and try again.`, 429);
   }
   if ((row.last_day || 0) >= perDay) {
+    await hit('day');
     return message(ctx, 'Daily limit reached', `You can post up to ${perDay} times per day. Come back tomorrow.`, 429);
   }
   if ((row.dupes || 0) > 0) {
+    await hit('dupe');
     return message(ctx, 'Already posted', 'You posted the same text in the last 24 hours.', 409);
   }
   return null;
 }
+
+// SQL condition: the user in `col` is not banned. A ban hides a member's posts, replies and votes
+// from everyone but admins; the rows stay in the database for investigation and come back on unban.
+const notBanned = (col) => `${col} NOT IN (SELECT id FROM users WHERE banned_at IS NOT NULL)`;
 
 async function markRead(db, userId, topicId) {
   await db
@@ -203,9 +220,9 @@ async function unreadTopics(db, userId) {
     .prepare(
       `SELECT t.id, t.title, t.lang, COUNT(r.id) AS new_count, MAX(r.created_at) AS last_at
        FROM content t
-       JOIN content r ON r.topic_id = t.id AND r.author_id != ?1 AND r.deleted_at IS NULL
+       JOIN content r ON r.topic_id = t.id AND r.author_id != ?1 AND r.deleted_at IS NULL AND ${notBanned('r.author_id')}
        LEFT JOIN topic_reads tr ON tr.user_id = ?1 AND tr.topic_id = t.id
-       WHERE t.kind = 'topic' AND t.deleted_at IS NULL
+       WHERE t.kind = 'topic' AND t.deleted_at IS NULL AND ${notBanned('t.author_id')}
          AND (t.author_id = ?1 OR EXISTS (SELECT 1 FROM content m WHERE m.topic_id = t.id AND m.author_id = ?1))
          AND r.created_at > COALESCE(tr.read_at, 0)
        GROUP BY t.id
@@ -248,12 +265,12 @@ async function hotTopics(db, tag) {
   const stmt = db.prepare(
     `SELECT c.id, c.title, c.lang, c.author_id, c.created_at, u.name AS author_name,
        substr(c.body, 1, 600) AS body_head,
-       (SELECT COUNT(*) FROM votes v WHERE v.content_id = c.id) AS votes,
-       (SELECT COUNT(*) FROM content r WHERE r.topic_id = c.id AND r.deleted_at IS NULL) AS replies,
+       (SELECT COUNT(*) FROM votes v WHERE v.content_id = c.id AND ${notBanned('v.user_id')}) AS votes,
+       (SELECT COUNT(*) FROM content r WHERE r.topic_id = c.id AND r.deleted_at IS NULL AND ${notBanned('r.author_id')}) AS replies,
        (SELECT COUNT(DISTINCT r.author_id) FROM content r
-          WHERE r.topic_id = c.id AND r.deleted_at IS NULL AND r.author_id != c.author_id) AS repliers
+          WHERE r.topic_id = c.id AND r.deleted_at IS NULL AND r.author_id != c.author_id AND ${notBanned('r.author_id')}) AS repliers
      FROM content c JOIN users u ON u.id = c.author_id
-     WHERE c.kind = 'topic' AND c.deleted_at IS NULL ${filter}
+     WHERE c.kind = 'topic' AND c.deleted_at IS NULL AND u.banned_at IS NULL ${filter}
      ORDER BY c.created_at DESC LIMIT ${SCAN_LIMIT}`,
   );
   const { results } = await (tag ? stmt.bind(tag) : stmt).all();
@@ -271,7 +288,7 @@ async function popularTags(db) {
     .prepare(
       `SELECT t.name, COUNT(*) AS n FROM content_tags ct
        JOIN tags t ON t.id = ct.tag_id JOIN content c ON c.id = ct.content_id
-       WHERE c.deleted_at IS NULL GROUP BY t.id ORDER BY n DESC, t.name LIMIT 30`,
+       WHERE c.deleted_at IS NULL AND ${notBanned('c.author_id')} GROUP BY t.id ORDER BY n DESC, t.name LIMIT 30`,
     )
     .all();
   return results;
@@ -279,9 +296,14 @@ async function popularTags(db) {
 
 async function getContent(db, id) {
   return db
-    .prepare('SELECT c.*, u.name AS author_name FROM content c JOIN users u ON u.id = c.author_id WHERE c.id = ?')
+    .prepare('SELECT c.*, u.name AS author_name, u.banned_at AS author_banned_at FROM content c JOIN users u ON u.id = c.author_id WHERE c.id = ?')
     .bind(Number(id))
     .first();
+}
+
+// Content by a banned member is visible to admins only.
+function visibleTo(user, c) {
+  return !!c && (!c.author_banned_at || !!user.is_admin);
 }
 
 // ---------- validation ----------
@@ -463,17 +485,21 @@ route('POST', '/new', async (ctx) => {
 
 async function renderTopic(ctx, id, { error, draft, status = 200 } = {}) {
   const topic = await getContent(ctx.db, id);
-  if (!topic || topic.kind !== 'topic') return message(ctx, 'Not found', 'This topic does not exist.', 404);
+  if (!visibleTo(ctx.user, topic) || topic.kind !== 'topic') return message(ctx, 'Not found', 'This topic does not exist.', 404);
   await markRead(ctx.db, ctx.user.id, topic.id);
-  const [{ results: replies }, tags, voteRow, mine] = await Promise.all([
+  const [{ results: allReplies }, tags, voteRow, mine] = await Promise.all([
     ctx.db
-      .prepare('SELECT c.*, u.name AS author_name FROM content c JOIN users u ON u.id = c.author_id WHERE c.topic_id = ? ORDER BY c.created_at, c.id')
+      .prepare(
+        `SELECT c.*, u.name AS author_name, u.banned_at AS author_banned_at FROM content c JOIN users u ON u.id = c.author_id
+         WHERE c.topic_id = ? ORDER BY c.created_at, c.id`,
+      )
       .bind(topic.id)
       .all(),
     tagsFor(ctx.db, [topic.id]),
-    ctx.db.prepare('SELECT COUNT(*) AS n FROM votes WHERE content_id = ?').bind(topic.id).first(),
+    ctx.db.prepare(`SELECT COUNT(*) AS n FROM votes WHERE content_id = ? AND ${notBanned('user_id')}`).bind(topic.id).first(),
     ctx.db.prepare('SELECT 1 FROM votes WHERE content_id = ? AND user_id = ?').bind(topic.id, ctx.user.id).first(),
   ]);
+  const replies = allReplies.filter((r) => visibleTo(ctx.user, r));
   const title = topic.deleted_at ? '[deleted topic]' : topic.title;
   return page(
     ctx,
@@ -488,7 +514,7 @@ route('GET', '/topic/(\\d+)', (ctx, id) => renderTopic(ctx, id));
 route('POST', '/topic/(\\d+)/reply', async (ctx, id) => {
   const get = await form(ctx.request);
   const topic = await getContent(ctx.db, id);
-  if (!topic || topic.kind !== 'topic' || topic.deleted_at) return message(ctx, 'Not found', 'This topic does not exist.', 404);
+  if (!visibleTo(ctx.user, topic) || topic.kind !== 'topic' || topic.deleted_at) return message(ctx, 'Not found', 'This topic does not exist.', 404);
   const v = validateBody(get('body'));
   if (v.error) return renderTopic(ctx, id, { error: v.error, draft: v.body, status: 400 });
   const flood = await floodCheck(ctx, v.body);
@@ -503,7 +529,7 @@ route('POST', '/topic/(\\d+)/reply', async (ctx, id) => {
 
 route('POST', '/topic/(\\d+)/vote', async (ctx, id) => {
   const topic = await getContent(ctx.db, id);
-  if (!topic || topic.kind !== 'topic' || topic.deleted_at) return message(ctx, 'Not found', 'This topic does not exist.', 404);
+  if (!visibleTo(ctx.user, topic) || topic.kind !== 'topic' || topic.deleted_at) return message(ctx, 'Not found', 'This topic does not exist.', 404);
   if (topic.author_id === ctx.user.id) return message(ctx, 'Not allowed', "You can't vote on your own topic.", 400);
   const existing = await ctx.db.prepare('SELECT 1 FROM votes WHERE user_id = ? AND content_id = ?').bind(ctx.user.id, topic.id).first();
   if (existing) {
@@ -571,17 +597,24 @@ route('GET', '/notifications', async (ctx) => page(ctx, 'New replies', V.notific
 // ---------- profiles and product cards ----------
 
 async function renderProfile(ctx, id, { error, values, status = 200 } = {}) {
-  const profile = await ctx.db.prepare('SELECT id, name, bio, created_at FROM users WHERE id = ?').bind(Number(id)).first();
-  if (!profile) return message(ctx, 'Not found', 'This member does not exist.', 404);
-  const [{ results: products }, { results: topics }] = await Promise.all([
+  const profile = await ctx.db.prepare('SELECT id, name, bio, banned_at, created_at FROM users WHERE id = ?').bind(Number(id)).first();
+  if (!profile || (profile.banned_at && !ctx.user.is_admin)) return message(ctx, 'Not found', 'This member does not exist.', 404);
+  const [{ results: products }, { results: topics }, { results: recent }] = await Promise.all([
     ctx.db.prepare('SELECT * FROM products WHERE user_id = ? ORDER BY created_at DESC, id DESC').bind(profile.id).all(),
     ctx.db
       .prepare("SELECT id, title, lang, created_at FROM content WHERE author_id = ? AND kind = 'topic' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 50")
       .bind(profile.id)
       .all(),
+    // Admins see every post, replies and deleted ones included, to investigate suspected bots.
+    ctx.user.is_admin
+      ? ctx.db
+          .prepare('SELECT id, kind, topic_id, title, body, created_at, deleted_at FROM content WHERE author_id = ? ORDER BY created_at DESC LIMIT 100')
+          .bind(profile.id)
+          .all()
+      : { results: null },
   ]);
   const own = profile.id === ctx.user.id;
-  return page(ctx, profile.name, V.profileBody({ profile, products, topics, own, error, values, maxProducts: MAX_PRODUCTS }), status);
+  return page(ctx, profile.name, V.profileBody({ profile, products, topics, recent, own, error, values, maxProducts: MAX_PRODUCTS }), status);
 }
 
 route('GET', '/u/(\\d+)', (ctx, id) => renderProfile(ctx, id));
@@ -684,7 +717,57 @@ async function renderAdmin(ctx, notice) {
       .all(),
     ctx.db.prepare('SELECT id, name, email, is_admin, banned_at, created_at FROM users ORDER BY created_at DESC').all(),
   ]);
-  return page(ctx, 'Admin', V.adminBody({ invites, users, notice, me: ctx.user }));
+  const active = await flaggedActivity(ctx.env, Date.now());
+  const alerts = { on: !!(ctx.env.EMAIL && ctx.env.ALERT_TO), ...alertThresholds(ctx.env) };
+  return page(ctx, 'Admin', V.adminBody({ invites, users, active, alerts, notice, me: ctx.user }));
+}
+
+// ---------- monitoring ----------
+
+function alertThresholds(env) {
+  return { maxPosts: limitFrom(env, 'ALERT_POSTS_24H', ALERT_POSTS), maxHits: limitFrom(env, 'ALERT_HITS_24H', ALERT_HITS) };
+}
+
+// Members (not banned) who posted or hit the anti-flood limits in the last 24 hours, busiest first, with bot flags.
+async function flaggedActivity(env, now) {
+  const { results } = await env.DB
+    .prepare(
+      `SELECT u.id, u.name, u.created_at AS joined_at, COUNT(c.id) AS posts,
+         COALESCE(SUM(c.kind = 'topic'), 0) AS topics, COALESCE(SUM(c.deleted_at IS NOT NULL), 0) AS deleted,
+         MAX(c.created_at) AS last_at,
+         (SELECT COUNT(*) FROM flood_hits f WHERE f.user_id = u.id AND f.created_at > ?1) AS hits
+       FROM users u LEFT JOIN content c ON c.author_id = u.id AND c.created_at > ?1
+       WHERE u.banned_at IS NULL
+       GROUP BY u.id
+       HAVING posts > 0 OR hits > 0
+       ORDER BY posts DESC, hits DESC
+       LIMIT 50`,
+    )
+    .bind(now - DAY_MS)
+    .all();
+  const thresholds = alertThresholds(env);
+  return results.map((r) => ({ ...r, flags: activityFlags(r, thresholds) }));
+}
+
+// Emails ALERT_TO about newly flagged members. Each member is named at most once per 24 hours.
+async function sendAlerts(env) {
+  const now = Date.now();
+  const flagged = (await flaggedActivity(env, now)).filter((r) => r.flags.length);
+  if (!flagged.length) return;
+  const { results: recent } = await env.DB.prepare('SELECT DISTINCT user_id FROM alerts WHERE created_at > ?').bind(now - DAY_MS).all();
+  const already = new Set(recent.map((r) => r.user_id));
+  const fresh = flagged.filter((r) => !already.has(r.id));
+  if (!fresh.length) return;
+  if (!env.EMAIL || !env.ALERT_TO) {
+    console.warn(`alerts: ${fresh.length} flagged member(s) but email is not configured (EMAIL binding / ALERT_TO)`);
+    return;
+  }
+  const mail = alertEmail(fresh, env.FORUM_ORIGIN || DEFAULT_FORUM_ORIGIN);
+  await env.EMAIL.send({ to: env.ALERT_TO, from: env.ALERT_FROM || DEFAULT_ALERT_FROM, ...mail });
+  await env.DB.batch(
+    fresh.map((r) => env.DB.prepare('INSERT INTO alerts (user_id, reasons, created_at) VALUES (?, ?, ?)').bind(r.id, r.flags.join('; '), now)),
+  );
+  console.log(`alerts: emailed about ${fresh.map((r) => r.name).join(', ')}`);
 }
 
 route('GET', '/admin', (ctx) => renderAdmin(ctx), { admin: true });
@@ -705,11 +788,11 @@ route('POST', '/admin/users/(\\d+)/(ban|unban|reset-password)', async (ctx, id, 
       db.prepare('UPDATE users SET banned_at = ? WHERE id = ?').bind(Date.now(), target.id),
       db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(target.id),
     ]);
-    return renderAdmin(ctx, `Banned ${esc(target.name)}.`);
+    return renderAdmin(ctx, `Banned ${esc(target.name)}. Their posts are hidden from members and kept for review; unban restores them.`);
   }
   if (action === 'unban') {
     await db.prepare('UPDATE users SET banned_at = NULL WHERE id = ?').bind(target.id).run();
-    return renderAdmin(ctx, `Unbanned ${esc(target.name)}.`);
+    return renderAdmin(ctx, `Unbanned ${esc(target.name)}. Their posts are visible again.`);
   }
   const temp = randomCode(12);
   const { hash, salt } = await hashPassword(temp);

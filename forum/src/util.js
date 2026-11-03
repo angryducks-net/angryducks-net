@@ -249,3 +249,27 @@ export function promoDraft(product) {
   const body = [intro.join('\n'), ...copy.sections.map(([h, prompt]) => `### ${h}\n${prompt}`)].join('\n\n');
   return { title, body, tags: PROMO_TAGS[status].join(', ') };
 }
+
+// ---------- monitoring ----------
+
+export const ALERT_POSTS = 15; // posts per 24 hours that flag a member
+export const ALERT_HITS = 3; // anti-flood rejections per 24 hours that flag a member
+
+// Reasons a member's last-24-hour activity looks like a bot; empty if nothing stands out.
+export function activityFlags({ posts = 0, hits = 0 }, { maxPosts = ALERT_POSTS, maxHits = ALERT_HITS } = {}) {
+  const flags = [];
+  if (posts >= maxPosts) flags.push(`${posts} posts in 24h`);
+  if (hits >= maxHits) flags.push(`hit posting limits ${hits}x in 24h`);
+  return flags;
+}
+
+// Alert email listing flagged members. rows: [{ id, name, flags }].
+export function alertEmail(rows, origin) {
+  const subject = `[AngryDucks] ${rows.length} member${rows.length === 1 ? '' : 's'} flagged for posting activity`;
+  const lines = rows.map((r) => `- ${r.name}: ${r.flags.join('; ')}\n  ${origin}/u/${r.id}`);
+  const text = `These members may be posting like bots:\n\n${lines.join('\n')}\n\nReview and ban at ${origin}/admin\n`;
+  const html = `<p>These members may be posting like bots:</p><ul>${rows
+    .map((r) => `<li><a href="${esc(`${origin}/u/${r.id}`)}">${esc(r.name)}</a>: ${esc(r.flags.join('; '))}</li>`)
+    .join('')}</ul><p><a href="${esc(`${origin}/admin`)}">Review and ban in Admin</a></p>`;
+  return { subject, text, html };
+}

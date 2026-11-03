@@ -171,3 +171,22 @@ test('promo draft: language, status, link, and it passes topic validation', asyn
     assert.ok(charLen(d.title) <= 100 && charLen(d.body) <= BODY_MAX && !hasCodeBlock(d.body));
   }
 });
+
+test('activity flags: posts and limit hits over the thresholds', async () => {
+  const { activityFlags } = await import('../src/util.js');
+  assert.deepEqual(activityFlags({ posts: 14, hits: 2 }), []);
+  assert.deepEqual(activityFlags({ posts: 15, hits: 0 }), ['15 posts in 24h']);
+  assert.deepEqual(activityFlags({ posts: 1, hits: 3 }), ['hit posting limits 3x in 24h']);
+  assert.deepEqual(activityFlags({ posts: 5, hits: 1 }, { maxPosts: 5, maxHits: 1 }), ['5 posts in 24h', 'hit posting limits 1x in 24h']);
+});
+
+test('alert email lists members with profile links and escapes names', async () => {
+  const { alertEmail } = await import('../src/util.js');
+  const mail = alertEmail([{ id: 7, name: '<b>bot</b>', flags: ['20 posts in 24h'] }], 'https://forum.example');
+  assert.equal(mail.subject, '[AngryDucks] 1 member flagged for posting activity');
+  assert.match(mail.text, /- <b>bot<\/b>: 20 posts in 24h\n {2}https:\/\/forum\.example\/u\/7/);
+  assert.match(mail.text, /https:\/\/forum\.example\/admin/);
+  assert.match(mail.html, /&lt;b&gt;bot&lt;\/b&gt;/);
+  assert.doesNotMatch(mail.html, /<b>bot/);
+  assert.match(alertEmail([{ id: 1, name: 'a', flags: [] }, { id: 2, name: 'b', flags: [] }], '').subject, /2 members/);
+});

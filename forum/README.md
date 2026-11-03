@@ -115,6 +115,46 @@ npm run deploy
 
 7. 进 Admin 页面生成邀请码，发给种子用户。
 
+## 刷帖提醒邮件（Cloudflare Email Sending）
+
+每 15 分钟检查一次，某个成员 24 小时内发帖 ≥15 条或触发发帖上限 ≥3 次，就发邮件给你；同一个人一天最多提醒一次。不配置邮件也能用：Admin 页面的 "Activity, last 24 hours" 表照样显示标记，只是不发邮件。
+
+1. 建新表（第一次部署这个功能时跑一次）：
+
+```bash
+npm run db:remote
+```
+
+2. 在 Cloudflare 上给 `angryducks.net` 开通 Email Sending。命令会自动添加 SPF/DKIM 的 DNS 记录，一般 5–15 分钟生效：
+
+```bash
+npx wrangler email sending enable angryducks.net
+```
+
+```bash
+npx wrangler email sending dns get angryducks.net
+```
+
+也可以在后台操作：Compute & AI → Email Service → Email Sending → Onboard Domain。
+
+3. 设置收件地址（用 secret，邮箱不会写进公开仓库）。命令会提示输入你的邮箱：
+
+```bash
+npx wrangler secret put ALERT_TO
+```
+
+4. 部署。`wrangler.toml` 里已经配好了 15 分钟一次的定时任务和 `EMAIL` 绑定，发件人只允许 `alerts@angryducks.net`：
+
+```bash
+npm run deploy
+```
+
+5. 打开 Admin 页面，"Activity" 下面应显示 "Alert emails are on"。
+
+可选：用 Worker 变量 `ALERT_POSTS_24H`、`ALERT_HITS_24H` 调整阈值。
+
+本地测试：`npx wrangler dev --test-scheduled --var ALERT_TO:you@example.com`，然后访问 `http://localhost:8787/__scheduled?cron=*/15+*+*+*+*` 触发一次。本地不会真的发信，邮件内容会写到 `.wrangler/tmp/email/` 下面，终端里会打印路径。
+
 ## 日常运维
 
 **更新代码**：
@@ -134,6 +174,8 @@ npm run db:remote
 ```bash
 npx wrangler d1 export angryducks-forum --remote --output backup-$(date +%Y%m%d).sql
 ```
+
+**封禁**：Admin 页面点 Ban。对方立刻下线、不能登录，他的帖子、回复和投票对其他成员全部隐藏，但数据保留；你在他的个人页还能看到他发过的全部内容，方便调查。点 Unban 全部恢复。
 
 **用户忘记密码**：Admin 页面点 Reset password，把显示的临时密码私下发给对方。
 

@@ -49,6 +49,7 @@ a.btn{display:inline-block;font-weight:600;font-size:13px;text-decoration:none;b
 a.btn:hover{background:var(--orange)}
 .err{background:#fde8e8;border:1px solid #f5b5b5;padding:8px 12px;border-radius:8px}
 .ok{background:#e8f7ea;border:1px solid #a8dcb0;padding:8px 12px;border-radius:8px}
+.flag{display:inline-block;font-size:12px;font-weight:600;color:#9a3412;background:#ffedd5;border-radius:6px;padding:1px 6px}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
 .card{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--soft)}
 .card h3{margin:0 0 4px;font-size:16px}
@@ -206,11 +207,11 @@ export function topicBody({ topic, tags, replies, votes, voted, user, error, dra
         ? `<span class="muted">${votes} vote${votes === 1 ? '' : 's'}</span>`
         : `<form class="vote" method="post" action="/topic/${topic.id}/vote"><button class="ghost">${voted ? '▲ Voted' : '▲ Vote'}</button><span class="muted">${votes}</span></form>`;
   const post = (c, isTopic) => `<article class="post" id="c${c.id}">
-  <div class="meta muted">${avatar(c.author_name)} ${userLink(c.author_id, c.author_name)} · ${relTime(c.created_at)}${c.edited_at && !c.deleted_at ? ' · edited' : ''} ${contentActions(c, user)}</div>
+  <div class="meta muted">${avatar(c.author_name)} ${userLink(c.author_id, c.author_name)} · ${relTime(c.created_at)}${c.edited_at && !c.deleted_at ? ' · edited' : ''}${c.author_banned_at ? ' <span class="flag">Hidden: author banned</span>' : ''} ${contentActions(c, user)}</div>
   ${c.deleted_at ? '<p class="deleted">[deleted]</p>' : `<div class="md"${langAttr(c.lang)} dir="auto">${renderMarkdown(c.body)}</div>`}
   ${isTopic ? `<div class="tags">${tags.map((t) => tagLink(t)).join('')}</div>${voteForm}` : ''}
 </article>`;
-  const liveCount = replies.filter((r) => !r.deleted_at).length;
+  const liveCount = replies.filter((r) => !r.deleted_at && !r.author_banned_at).length;
   const replyForm = topic.deleted_at
     ? ''
     : `<h2>Reply</h2>${errorBox(error)}<form class="stack" method="post" action="/topic/${topic.id}/reply">
@@ -260,7 +261,19 @@ function productCard(p, own) {
 </div>`;
 }
 
-export function profileBody({ profile, products, topics, own, error, values, maxProducts }) {
+// Admin-only list of everything a member posted, replies and deleted posts included.
+function recentPosts(recent) {
+  if (!recent.length) return '<p class="muted">No posts.</p>';
+  return `<ul class="list">${recent
+    .map((c) => {
+      const href = c.kind === 'topic' ? `/topic/${c.id}` : `/topic/${c.topic_id}#c${c.id}`;
+      const label = c.kind === 'topic' ? c.title : c.body.slice(0, 80);
+      return `<li><a href="${href}" dir="auto">${esc(label)}</a><div class="muted">${c.kind} · ${relTime(c.created_at)}${c.deleted_at ? ' · deleted' : ''}</div></li>`;
+    })
+    .join('')}</ul>`;
+}
+
+export function profileBody({ profile, products, topics, recent, own, error, values, maxProducts }) {
   const addForm =
     own && products.length < maxProducts
       ? `<details${error ? ' open' : ''}><summary>Add a product card</summary>${errorBox(error)}<form class="stack" method="post" action="/products">${productFields(values)}<button>Add card</button></form></details>`
@@ -270,11 +283,13 @@ export function profileBody({ profile, products, topics, own, error, values, max
   return `<h1>${avatar(profile.name, true)} <span translate="no">${esc(profile.name)}</span></h1>
 ${profile.bio ? `<p class="text" dir="auto">${esc(profile.bio)}</p>` : own ? '<p class="muted">No bio yet. <a href="/settings">Add one</a>.</p>' : ''}
 <p class="muted">Joined ${relTime(profile.created_at)}</p>
+${profile.banned_at ? `<p class="err">Banned ${relTime(profile.banned_at)}. Members cannot see this profile or any of these posts.</p>` : ''}
 <h2>Products</h2>
 ${products.length ? `<div class="cards">${products.map((p) => productCard(p, own)).join('')}</div>` : '<p class="muted">No product cards yet.</p>'}
 ${addForm}
 <h2>Topics</h2>
-${topics.length ? `<ul class="list">${topics.map((t) => `<li><a class="title" href="/topic/${t.id}"${langAttr(t.lang)} dir="auto">${esc(t.title)}</a><div class="muted">${relTime(t.created_at)}</div></li>`).join('')}</ul>` : '<p class="muted">No topics yet.</p>'}`;
+${topics.length ? `<ul class="list">${topics.map((t) => `<li><a class="title" href="/topic/${t.id}"${langAttr(t.lang)} dir="auto">${esc(t.title)}</a><div class="muted">${relTime(t.created_at)}</div></li>`).join('')}</ul>` : '<p class="muted">No topics yet.</p>'}
+${recent ? `<h2>All posts <span class="hint">Admins only. Newest 100, replies and deleted posts included.</span></h2>${recentPosts(recent)}` : ''}`;
 }
 
 export function productEditBody({ product, error, values }) {
@@ -304,8 +319,27 @@ export function notificationsBody({ topics }) {
 ${topics.length ? `<ul class="list">${topics.map((t) => `<li><a class="title" href="/topic/${t.id}"${langAttr(t.lang)} dir="auto">${esc(t.title)}</a><div class="muted">${t.new_count} new · last ${relTime(t.last_at)}</div></li>`).join('')}</ul>` : '<p class="muted">Nothing new.</p>'}`;
 }
 
-export function adminBody({ invites, users, notice, me }) {
+function banForm(u) {
+  return `<form class="inline" method="post" action="/admin/users/${u.id}/ban"><button class="ghost">Ban</button></form>`;
+}
+
+function activitySection(active, alerts) {
+  const status = alerts.on
+    ? `Alert emails are on. Checked every 15 minutes; a member is flagged at ${alerts.maxPosts}+ posts or ${alerts.maxHits}+ limit hits in 24 hours, and named at most once a day.`
+    : 'Alert emails are off: the EMAIL binding or the ALERT_TO secret is missing. Flags still show here.';
+  const rows = active
+    .map(
+      (a) => `<tr><td>${userLink(a.id, a.name)}<div class="muted">joined ${relTime(a.joined_at)}</div></td><td>${a.posts}${a.topics ? ` <span class="muted">(${a.topics} topics)</span>` : ''}${a.deleted ? ` <span class="muted">${a.deleted} deleted</span>` : ''}</td><td>${a.hits}</td><td>${a.last_at ? relTime(a.last_at) : ''}</td><td>${a.flags.map((f) => `<span class="flag">${esc(f)}</span>`).join(' ')}</td><td>${a.id === alerts.me ? '' : banForm(a)}</td></tr>`,
+    )
+    .join('');
+  return `<h2>Activity, last 24 hours</h2>
+<p class="muted">${status}</p>
+${active.length ? `<table><tr><th>Member</th><th>Posts</th><th>Limit hits</th><th>Last post</th><th>Flags</th><th></th></tr>${rows}</table>` : '<p class="muted">No posts in the last 24 hours.</p>'}`;
+}
+
+export function adminBody({ invites, users, active, alerts, notice, me }) {
   return `<h1>Admin</h1>${notice ? `<p class="ok">${notice}</p>` : ''}
+${activitySection(active, { ...alerts, me: me.id })}
 <h2>Invite codes</h2>
 <form method="post" action="/admin/invites"><button>Generate invite code</button></form>
 <table><tr><th>Code</th><th>Created</th><th>Used by</th></tr>
@@ -316,7 +350,7 @@ ${invites.map((i) => `<tr><td><code>${esc(i.code)}</code></td><td>${relTime(i.cr
 ${users
   .map(
     (u) => `<tr><td>${userLink(u.id, u.name)}${u.is_admin ? ' <span class="muted">admin</span>' : ''}${u.banned_at ? ' <span class="muted">banned</span>' : ''}</td><td>${esc(u.email)}</td><td>${relTime(u.created_at)}</td><td>
-${u.id === me.id ? '' : u.banned_at ? `<form class="inline" method="post" action="/admin/users/${u.id}/unban"><button class="ghost">Unban</button></form>` : `<form class="inline" method="post" action="/admin/users/${u.id}/ban"><button class="ghost">Ban</button></form>`}
+${u.id === me.id ? '' : u.banned_at ? `<form class="inline" method="post" action="/admin/users/${u.id}/unban"><button class="ghost">Unban</button></form>` : banForm(u)}
 <form class="inline" method="post" action="/admin/users/${u.id}/reset-password"><button class="ghost">Reset password</button></form>
 </td></tr>`,
   )

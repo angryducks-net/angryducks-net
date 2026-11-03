@@ -347,6 +347,42 @@ await step('ban ends sessions and blocks login', async () => {
   assert.match(r.text, /suspended/);
 });
 
+await step('ban hides the member posts from members, admins still see them, unban restores', async () => {
+  const bobId = (await admin.get('/admin')).text.match(/href="\/u\/(\d+)" translate="no">Bob/)[1];
+  // Hidden from members everywhere, but the rows are kept.
+  const home = await dave.get('/');
+  assert.equal(home.status, 200);
+  assert.match(home.text, new RegExp(`href="/topic/${t1}"`));
+  assert.doesNotMatch(home.text, new RegExp(`href="/topic/${t2}"`));
+  assert.equal((await dave.get(`/topic/${t2}`)).status, 404);
+  assert.equal((await dave.post(`/topic/${t2}/reply`, { body: 'reply to a hidden topic' })).status, 404);
+  assert.doesNotMatch((await dave.get(`/topic/${t1}`)).text, /spam 0/);
+  assert.equal((await dave.get(`/u/${bobId}`)).status, 404);
+  // Admins can still investigate.
+  const asAdmin = await admin.get(`/topic/${t2}`);
+  assert.equal(asAdmin.status, 200);
+  assert.match(asAdmin.text, /Hidden: author banned/);
+  const profile = await admin.get(`/u/${bobId}`);
+  assert.match(profile.text, /Banned .*Members cannot see/);
+  assert.match(profile.text, /All posts/);
+  assert.match(profile.text, /spam 0/);
+  // Unban brings everything back.
+  await admin.post(`/admin/users/${bobId}/unban`, {});
+  assert.match((await dave.get('/')).text, new RegExp(`href="/topic/${t2}"`));
+  assert.match((await dave.get(`/topic/${t1}`)).text, /spam 0/);
+});
+
+await step('admin activity panel lists recent posters and limit hits', async () => {
+  const r = await admin.get('/admin');
+  assert.match(r.text, /Activity, last 24 hours/);
+  assert.match(r.text, /Alert emails are (on|off)/);
+  // bob hit the per-minute limit in the rate-limit step (more than once on fast machines).
+  const bobRow = r.text.match(/<tr><td><a [^>]*href="\/u\/\d+" translate="no">Bob<\/a>.*?<\/tr>/s)[0];
+  const hits = Number([...bobRow.matchAll(/<td>(.*?)<\/td>/gs)][2][1]);
+  assert.ok(hits >= 1, `expected limit hits for Bob, got ${hits}`);
+  assert.match(bobRow, /action="\/admin\/users\/\d+\/ban"/);
+});
+
 await step('logout clears session', async () => {
   await admin.post('/logout', {});
   assert.equal((await admin.get('/')).status, 303);

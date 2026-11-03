@@ -123,7 +123,7 @@ This is the running log of how the AngryDucks community and forum are designed, 
   2. **Email verification**, which needs an email-sending service.
   3. **Per-IP limits** on login and join attempts. Today's lockout works per account only.
   4. **Link limits for new accounts.** Spam is mostly links.
-  5. **Banning hides the member's posts.** Today a ban only blocks login; posts stay up and must be deleted one by one.
+  5. ~~**Banning hides the member's posts.**~~ Done early in D24.
   6. **A report button**, and later AI-assisted spam flagging alongside AI tagging.
 - **Status:** Deferred until we plan public registration. Revisit together with D3 and D4.
 
@@ -138,4 +138,17 @@ This is the running log of how the AngryDucks community and forum are designed, 
 ### D23. The manifesto has one source
 - **Decision:** `MANIFESTO.md` at the repository root is the only place the manifesto is edited. A script copies it into the README and the landing page, deploys run that script first, and a unit test fails if any copy is out of date.
 - **Why:** The manifesto appears in several places and will keep evolving. Editing it in one place means the copies never drift.
+- **Status:** Active
+
+---
+
+## 2026-11-03 · Ban and bot alerts
+
+### D24. A ban hides the member's posts; admins get bot-activity alerts by email
+- **Decision:**
+  1. Banning a member hides their topics, replies and votes from other members everywhere (lists, tags, topic pages, notifications, their profile). Nothing is deleted. Admins still see the posts, marked "Hidden: author banned", plus an admin-only list of everything the member posted, so they can investigate. Unbanning brings it all back.
+  2. Each time the anti-flood limits (D12) reject a post, we record it.
+  3. The Admin page shows each member's posts and limit hits for the last 24 hours, with a Ban button.
+  4. Every 15 minutes a cron job flags members with 15+ posts or 3+ limit hits in 24 hours. It emails the admin through Cloudflare Email Sending and names each member at most once a day. The thresholds can be changed with the Worker vars `ALERT_POSTS_24H` / `ALERT_HITS_24H`.
+- **Why:** While the forum is invite-only (D20), we do not limit posting further. We ban bad actors after the fact. That only works if a ban removes the damage at once and we find out quickly. Keeping the data lets us investigate and undo mistakes.
 - **Status:** Active
