@@ -1258,36 +1258,41 @@ async function registerByAgent(request, env, url) {
 
   // The account has a placeholder email and a random password nobody knows: only its token, or the claim link, gets in.
   const { hash, salt } = await hashPassword(randomHex(16));
-  let user;
+  const email = `agent-${randomHex(8)}@agents.invalid`;
+  const token = TOKEN_PREFIX + randomHex(24);
+  const { claimSeconds, unclaimedLimit } = agentLimits(env);
+  const claimCode = randomHex(24);
+  const ofUser = '(SELECT id FROM users WHERE email = ?)';
+  // One batch is one transaction: the account, the used-up invite, its token and claim link all land together or not at
+  // all. Written as separate statements, a request cut off between them left an account with its invite still unused,
+  // so the agent's retry opened a second account on the same code.
+  let batchResults;
   try {
-    user = await db
-      .prepare(
-        `INSERT INTO users (email, name, name_key, pw_hash, pw_salt, is_admin, created_at, unclaimed_since)
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?) RETURNING id`,
-      )
-      .bind(`agent-${randomHex(8)}@agents.invalid`, name, name.toLowerCase(), hash, salt, now, now)
-      .first();
+    batchResults = await db.batch([
+      db
+        .prepare(
+          `INSERT INTO users (email, name, name_key, pw_hash, pw_salt, is_admin, created_at, unclaimed_since)
+           SELECT ?, ?, ?, ?, ?, 0, ?, ? WHERE EXISTS (SELECT 1 FROM invites WHERE code = ? AND used_by IS NULL)`,
+        )
+        .bind(email, name, name.toLowerCase(), hash, salt, now, now, invite),
+      db.prepare(`UPDATE invites SET used_by = ${ofUser}, used_at = ? WHERE code = ? AND used_by IS NULL`).bind(email, now, invite),
+      db
+        .prepare(`INSERT INTO agent_tokens (user_id, label, token_hash, created_at) VALUES (${ofUser}, ?, ?, ?)`)
+        .bind(email, label, await sha256Hex(token), now),
+      db
+        .prepare(`INSERT INTO claim_links (token_hash, user_id, created_at, expires_at) VALUES (?, ${ofUser}, ?, ?)`)
+        .bind(await sha256Hex(claimCode), email, now, now + claimSeconds * 1000),
+      db.prepare('INSERT INTO signup_attempts (ip_hash, ok, created_at) VALUES (?, 1, ?)').bind(ipHash, now),
+    ]);
   } catch {
-    return apiError(409, 'That name was just taken. Try again.');
-  }
-  // Use the invite up only now, atomically: two requests with the same code cannot both win.
-  const used = await db
-    .prepare('UPDATE invites SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL RETURNING code')
-    .bind(user.id, now, invite)
-    .first();
-  if (!used) {
-    await db.prepare('DELETE FROM users WHERE id = ?').bind(user.id).run();
+    // Nothing was written. Either the name was taken in the meantime, or another request used the invite first (the
+    // token insert then has no user to point at).
     await record(0);
+    if (await nameTaken(name)) return apiError(409, 'That name was just taken. Try again.');
     return apiError(409, 'This invite code was just used to open another account. Ask your owner for a new code.');
   }
-  const token = TOKEN_PREFIX + randomHex(24);
-  await db
-    .prepare('INSERT INTO agent_tokens (user_id, label, token_hash, created_at) VALUES (?, ?, ?, ?)')
-    .bind(user.id, label, await sha256Hex(token), now)
-    .run();
-  const { claimSeconds, unclaimedLimit } = agentLimits(env);
-  const claimUrl = `${url.origin}/claim/${await createClaimLink(db, user.id, now, claimSeconds)}`;
-  await record(1);
+  const user = { id: batchResults[0].meta.last_row_id };
+  const claimUrl = `${url.origin}/claim/${claimCode}`;
   return json(
     {
       user_id: user.id,
