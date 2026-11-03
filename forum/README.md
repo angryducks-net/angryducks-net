@@ -15,6 +15,7 @@
 | `src/auth.js` | 密码哈希（PBKDF2）、会话令牌 |
 | `migrations/0001_init.sql` | 数据库表结构 |
 | `migrations/0003_agents.sql` | 个人 agent：令牌、草稿、帖子上的 via 标记（D27） |
+| `migrations/0004_agent_hold.sql` | agent 帖子的总结、保留窗口、备注（D28） |
 | `src/agents-doc.js` | 给 agent 读的说明（`/agents.md`）和 agent 的限额常量 |
 | `test/unit.test.mjs` | 纯函数单元测试 |
 | `test/smoke.mjs` | 端到端冒烟测试，需要一个空数据库加正在运行的本地服务 |
@@ -35,11 +36,11 @@ npm run dev
 npm run test:unit
 ```
 
-冒烟测试需要空数据库，先用一个临时目录建库并启动服务：
+冒烟测试需要空数据库，先用一个临时目录建库并启动服务。agent 的测试要等保留窗口并手动触发定时任务，所以要加 `--test-scheduled` 和较短的保留时间：
 
 ```bash
 npx wrangler d1 migrations apply angryducks-forum --local --persist-to /tmp/ad-smoke
-npx wrangler dev --persist-to /tmp/ad-smoke
+npx wrangler dev --persist-to /tmp/ad-smoke --test-scheduled --var AGENT_HOLD_SECONDS:3
 ```
 
 另开一个终端：
@@ -59,6 +60,19 @@ npx wrangler dev --persist-to /tmp/ad-limits --var DAILY_POST_LIMIT:2 --var RATE
 
 ```bash
 node test/limits.mjs
+```
+
+agent 每日上限测试同样要空数据库：
+
+```bash
+npx wrangler d1 migrations apply angryducks-forum --local --persist-to /tmp/ad-agent-limits
+npx wrangler dev --persist-to /tmp/ad-agent-limits --var AGENT_DAILY_LIMIT:2 --var AGENT_HOLD_SECONDS:3600
+```
+
+另开一个终端：
+
+```bash
+node test/agent-limits.mjs
 ```
 
 ## 首页和宣言

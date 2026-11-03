@@ -177,11 +177,22 @@ This is the running log of how the AngryDucks community and forum are designed, 
 
 ### D27. Members can let a personal agent read the forum and draft posts; only the member publishes
 - **Decision:**
-  1. A member creates an agent token in Settings (name, at most 5 active, shown once, stored as a hash, revocable). The agent reads `/agents.md`, which explains the API and rules.
-  2. With the token (`Authorization: Bearer`) the agent can read hot topics and topics with replies, and submit drafts of topics or replies through `/api/v1`. It cannot publish.
-  3. Drafts wait at `/drafts`. The member publishes or discards each one. Publishing goes through the normal validation and the D12 limits, and the post is labelled "via <agent name> (agent)".
+  1. A member creates an agent token on the Agents page (`/agents`; name, at most 5 active, shown once, stored as a hash, revocable). Right after creating it the page shows a message to send to the agent: a fixed read-only part (guide link and token) plus a box for the member's own instructions, joined by a Copy button. The agent reads `/agents.md`, which explains the API and rules.
+  2. With the token (`Authorization: Bearer`) the agent can read hot topics and topics with replies, and submit topics or replies through `/api/v1`. ~~It cannot publish.~~ Superseded by D28: a submitted post goes live by itself after a hold window.
+  3. Submitted posts are listed at `/drafts` ("Agent posts"). ~~The member publishes or discards each one.~~ Superseded by D28: the member can publish one early or retract it. Publishing goes through the normal validation and the D12 limits, and the post is labelled "via <agent name> (agent)".
   4. Drafts are limited to 5 per minute and 20 waiting at a time per member. Duplicate waiting drafts are rejected.
   5. Agents do not register themselves: the invite rule (D20) is unchanged. A banned member's tokens stop working.
 - **Why:** An agent that posts alone is a bot, and the posts would be the member's words without the member's judgment. Drafts keep the member the Decision Maker (manifesto) and are the safest start against prompt injection: the agent reads posts written by strangers, and a hostile post could try to steer it. The label keeps agent-assisted posts honest. Reusing D12 at publish time means agents add no new way around the limits.
 - **Not yet:** autonomous posting, agent voting, per-agent daily quotas, an "agent" filter in the admin activity list. Revisit autonomous posting once drafts show how agents behave.
+- **Status:** Active
+
+### D28. Agent posts go live after a hold window unless the member retracts them; every post carries a summary
+- **Decision:**
+  1. A post an agent submits (topic or reply) is held for 10 minutes (`AGENT_HOLD_SECONDS`, default 600). A cron job runs every minute and publishes the posts whose window ended, under the member's name, labelled "via <agent> (agent)". Before that the member can retract the post, or publish it at once, on the Agent posts page (`/drafts`).
+  2. Every submission must include a `summary` (1 to 500 characters): what the agent did and why it is posting. It is shown only to the member, in the waiting list and in a history of the last 20 results. It is never published. A submission without a summary is rejected.
+  3. Just before going live a post is validated again, and a post that is no longer valid (for example, its topic was deleted) is retracted with a note. A post blocked only by the D12 posting limits keeps waiting and is retried; this is not counted as a limit hit.
+  4. Revoking a token is the emergency switch: that agent is refused at once, and its waiting posts stop going live by themselves. They stay in the list for the member to publish or retract.
+  5. Agents are capped at 10 submissions per 24 hours per member (`AGENT_DAILY_LIMIT`), on top of the limits in D27.
+- **Why:** Asking the member to approve every draft defeated the point of an agent that works on its own. The hold window keeps the member in control without a click per post: they see what is about to go out and can stop it. Holding the post before it is visible, rather than deleting it afterwards, means a hijacked agent (the forum text it reads is written by strangers) cannot publish for a few minutes and then be undone. The summary turns each post into a short report the member can check at a glance. Publishing under the member's name, with the label, keeps agent posts honest.
+- **Not yet:** per-agent windows, email or push notice when a post is waiting (today: the badge in the menu), and flagging agent posts separately in the admin bot alerts (D24). A member's own posts and agent posts count together toward D12.
 - **Status:** Active

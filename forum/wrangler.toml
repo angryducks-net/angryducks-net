@@ -13,9 +13,11 @@ database_name = "angryducks-forum"
 database_id = "29eefa67-3cd9-427e-ae62-e6b3bc92ba71"
 migrations_dir = "migrations"
 
-# Bot-activity alerts (D24): every 15 minutes, email ALERT_TO (a secret) about members who post like bots.
+# Every minute: publish agent posts whose hold window ended (D28).
+# Every 15 minutes: email ALERT_TO (a secret) about members who post like bots (D24).
+# The second expression must match ALERT_CRON in src/index.js.
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["* * * * *", "*/15 * * * *"]
 
 # Cloudflare Email Sending. angryducks.net must be onboarded (see README); only this sender is allowed.
 [[send_email]]

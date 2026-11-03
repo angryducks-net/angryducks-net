@@ -5,7 +5,9 @@ import {
 import {
   hashPassword, LOCK_AFTER, LOCK_MS, randomCode, randomHex, readCookie, SESSION_MS, sessionCookie, sha256Hex, verifyPassword,
 } from './auth.js';
-import { agentsGuide, DRAFTS_PER_MIN, LABEL_MAX, MAX_PENDING_DRAFTS, MAX_TOKENS, TOKEN_PREFIX } from './agents-doc.js';
+import {
+  agentMessage, agentsGuide, AGENT_DAILY_LIMIT, DRAFTS_PER_MIN, HOLD_SECONDS, LABEL_MAX, MAX_PENDING_DRAFTS, MAX_TOKENS, SUMMARY_MAX, TOKEN_PREFIX,
+} from './agents-doc.js';
 import * as V from './views.js';
 import { renderMarkdown, excerpt } from './markdown.js';
 import { MANIFESTO_MD } from './manifesto.generated.js';
@@ -26,6 +28,7 @@ const REPO_URL = 'https://github.com/angryducks-net/angryducks-net';
 // Alert emails: sender must be on the domain onboarded to Cloudflare Email Sending; recipient is the ALERT_TO secret.
 const DEFAULT_ALERT_FROM = 'alerts@angryducks.net';
 const DAY_MS = 86_400_000;
+const ALERT_CRON = '*/15 * * * *'; // must match the second cron in wrangler.toml
 const MANIFESTO_HTML = renderMarkdown(MANIFESTO_MD);
 
 const SECURITY_HEADERS = {
@@ -44,9 +47,15 @@ export default {
       return html(V.layout({ title: 'Error', body: V.messageBody('Something broke', 'Please try again.') }), 500);
     }
   },
-  // Cron trigger (wrangler.toml): email admins about members whose posting looks like a bot.
+  // Cron triggers (wrangler.toml). Every minute: publish agent posts whose hold window ended (D28).
+  // Every 15 minutes: email admins about members whose posting looks like a bot (D24).
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(sendAlerts(env).catch((err) => console.error('alerts failed', err)));
+    ctx.waitUntil(
+      (async () => {
+        await publishDueAgentPosts(env).catch((err) => console.error('agent publish failed', err));
+        if (event.cron === ALERT_CRON) await sendAlerts(env).catch((err) => console.error('alerts failed', err));
+      })(),
+    );
   },
 };
 
@@ -60,10 +69,10 @@ function redirect(location, extra = {}) {
   return new Response(null, { status: 303, headers: { Location: location, ...extra } });
 }
 
-async function page(ctx, title, body, status = 200) {
+async function page(ctx, title, body, status = 200, headers = {}) {
   const unread = ctx.user ? await unreadTopics(ctx.db, ctx.user.id).then((r) => r.length) : 0;
   const drafts = ctx.user ? await pendingDraftCount(ctx.db, ctx.user.id) : 0;
-  return html(V.layout({ title, user: ctx.user, unread, drafts, body }), status);
+  return html(V.layout({ title, user: ctx.user, unread, drafts, body }), status, headers);
 }
 
 function message(ctx, title, text, status) {
@@ -173,35 +182,35 @@ function limitFrom(env, key, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-// Returns an error page if the user is posting too fast, too much, or repeating themselves; else null.
-async function floodCheck(ctx, body) {
+// Which anti-flood limit a new post by this user would break: 'minute', 'day', 'dupe', or null. Records nothing.
+async function floodReason(env, db, userId, body) {
   const now = Date.now();
-  const perMin = limitFrom(ctx.env, 'RATE_LIMIT_PER_MIN', RATE_LIMIT);
-  const perDay = limitFrom(ctx.env, 'DAILY_POST_LIMIT', DAILY_LIMIT);
-  const row = await ctx.db
+  const perMin = limitFrom(env, 'RATE_LIMIT_PER_MIN', RATE_LIMIT);
+  const perDay = limitFrom(env, 'DAILY_POST_LIMIT', DAILY_LIMIT);
+  const row = await db
     .prepare(
       `SELECT SUM(created_at > ?2) AS last_min, COUNT(*) AS last_day,
          SUM(body = ?3 AND deleted_at IS NULL) AS dupes
        FROM content WHERE author_id = ?1 AND created_at > ?4`,
     )
-    .bind(ctx.user.id, now - 60_000, body, now - DAY_MS)
+    .bind(userId, now - 60_000, body, now - DAY_MS)
     .first();
-  // Every rejection is recorded: repeatedly hitting the limits is the clearest sign of a script.
-  const hit = (reason) =>
-    ctx.db.prepare('INSERT INTO flood_hits (user_id, reason, created_at) VALUES (?, ?, ?)').bind(ctx.user.id, reason, now).run();
-  if ((row.last_min || 0) >= perMin) {
-    await hit('minute');
-    return message(ctx, 'Slow down', `You can post up to ${perMin} times per minute. Wait a moment and try again.`, 429);
-  }
-  if ((row.last_day || 0) >= perDay) {
-    await hit('day');
-    return message(ctx, 'Daily limit reached', `You can post up to ${perDay} times per day. Come back tomorrow.`, 429);
-  }
-  if ((row.dupes || 0) > 0) {
-    await hit('dupe');
-    return message(ctx, 'Already posted', 'You posted the same text in the last 24 hours.', 409);
-  }
+  if ((row.last_min || 0) >= perMin) return { reason: 'minute', perMin, perDay };
+  if ((row.last_day || 0) >= perDay) return { reason: 'day', perMin, perDay };
+  if ((row.dupes || 0) > 0) return { reason: 'dupe', perMin, perDay };
   return null;
+}
+
+// Returns an error page if the user is posting too fast, too much, or repeating themselves; else null.
+async function floodCheck(ctx, body) {
+  const found = await floodReason(ctx.env, ctx.db, ctx.user.id, body);
+  if (!found) return null;
+  const { reason, perMin, perDay } = found;
+  // Every rejection is recorded: repeatedly hitting the limits is the clearest sign of a script.
+  await ctx.db.prepare('INSERT INTO flood_hits (user_id, reason, created_at) VALUES (?, ?, ?)').bind(ctx.user.id, reason, Date.now()).run();
+  if (reason === 'minute') return message(ctx, 'Slow down', `You can post up to ${perMin} times per minute. Wait a moment and try again.`, 429);
+  if (reason === 'day') return message(ctx, 'Daily limit reached', `You can post up to ${perDay} times per day. Come back tomorrow.`, 429);
+  return message(ctx, 'Already posted', 'You posted the same text in the last 24 hours.', 409);
 }
 
 // SQL condition: the user in `col` is not banned. A ban hides a member's posts, replies and votes
@@ -679,12 +688,8 @@ route('POST', '/products/(\\d+)/delete', async (ctx, id) => {
 
 // ---------- settings ----------
 
-async function settingsPage(ctx, opts = {}, status = 200) {
-  const { results: tokens } = await ctx.db
-    .prepare('SELECT id, label, created_at, last_used_at, revoked_at FROM agent_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT 50')
-    .bind(ctx.user.id)
-    .all();
-  return page(ctx, 'Settings', V.settingsBody({ user: ctx.user, tokens, ...opts }), status);
+function settingsPage(ctx, opts = {}, status = 200) {
+  return page(ctx, 'Settings', V.settingsBody({ user: ctx.user, ...opts }), status);
 }
 
 route('GET', '/settings', (ctx) => settingsPage(ctx));
@@ -720,9 +725,15 @@ route('POST', '/settings/password', async (ctx) => {
   return startSession(ctx, ctx.user.id, '/settings');
 });
 
-// ---------- agents (D27) ----------
-// A member gives their personal agent a token. The agent can read the forum and submit drafts;
-// only the member can publish them. Published posts carry a "via <agent>" label.
+// ---------- agents (D27, D28) ----------
+// A member gives their personal agent a token. The agent can read the forum and submit posts, each with a
+// summary of what it did. A post is held for a short window, during which the member can retract it; then it goes
+// live under the member's name, labelled "via <agent>". Rows live in agent_drafts (the name predates D28).
+
+// Hold window and daily submission cap; override with Worker vars AGENT_HOLD_SECONDS / AGENT_DAILY_LIMIT.
+function agentLimits(env) {
+  return { holdSeconds: limitFrom(env, 'AGENT_HOLD_SECONDS', HOLD_SECONDS), dailyLimit: limitFrom(env, 'AGENT_DAILY_LIMIT', AGENT_DAILY_LIMIT) };
+}
 
 async function pendingDraftCount(db, userId) {
   const row = await db.prepare("SELECT COUNT(*) AS n FROM agent_drafts WHERE user_id = ? AND status = 'pending'").bind(userId).first();
@@ -730,43 +741,76 @@ async function pendingDraftCount(db, userId) {
 }
 
 route('GET', '/agents\\.md', (ctx) =>
-  new Response(agentsGuide(ctx.url.origin), { headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'X-Content-Type-Options': 'nosniff' } }),
+  new Response(agentsGuide(ctx.url.origin, agentLimits(ctx.env)), { headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'X-Content-Type-Options': 'nosniff' } }),
   { open: true });
 
-route('POST', '/settings/agents', async (ctx) => {
+// The Agents page. A freshly created token is shown once, together with a copy button, which needs
+// a script: this is the only page whose CSP allows one, and only the inline script carrying its nonce.
+async function agentsPage(ctx, opts = {}, status = 200) {
+  const { results: tokens } = await ctx.db
+    .prepare('SELECT id, label, created_at, last_used_at, revoked_at FROM agent_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT 50')
+    .bind(ctx.user.id)
+    .all();
+  const nonce = randomHex(16);
+  const headers = { 'Cache-Control': 'no-store' };
+  if (opts.newToken) headers['Content-Security-Policy'] = `${SECURITY_HEADERS['Content-Security-Policy']}; script-src 'nonce-${nonce}'`;
+  const message = opts.newToken ? agentMessage(ctx.url.origin, opts.newToken.token) : null;
+  const holdMinutes = Math.max(1, Math.round(agentLimits(ctx.env).holdSeconds / 60));
+  return page(ctx, 'Your agent', V.agentsBody({ tokens, message, nonce, holdMinutes, ...opts }), status, headers);
+}
+
+route('GET', '/agents', (ctx) => agentsPage(ctx));
+
+route('POST', '/agents', async (ctx) => {
   const get = await form(ctx.request);
   const label = get('label').replace(/\s+/g, ' ').trim();
   if (!label || charLen(label) > LABEL_MAX) {
-    return settingsPage(ctx, { error: `Agent name is required and must be at most ${LABEL_MAX} characters.` }, 400);
+    return agentsPage(ctx, { error: `Agent name is required and must be at most ${LABEL_MAX} characters.` }, 400);
   }
   const { n } = await ctx.db.prepare('SELECT COUNT(*) AS n FROM agent_tokens WHERE user_id = ? AND revoked_at IS NULL').bind(ctx.user.id).first();
-  if (n >= MAX_TOKENS) return settingsPage(ctx, { error: `You can have at most ${MAX_TOKENS} active tokens. Revoke one first.` }, 400);
+  if (n >= MAX_TOKENS) return agentsPage(ctx, { error: `You can have at most ${MAX_TOKENS} active tokens. Revoke one first.` }, 400);
   const token = TOKEN_PREFIX + randomHex(24);
   await ctx.db
     .prepare('INSERT INTO agent_tokens (user_id, label, token_hash, created_at) VALUES (?, ?, ?, ?)')
     .bind(ctx.user.id, label, await sha256Hex(token), Date.now())
     .run();
-  return settingsPage(ctx, { newToken: { label, token } });
+  return agentsPage(ctx, { newToken: { label, token } });
 });
 
-route('POST', '/settings/agents/(\\d+)/revoke', async (ctx, id) => {
+route('POST', '/agents/(\\d+)/revoke', async (ctx, id) => {
   await ctx.db
     .prepare('UPDATE agent_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL')
     .bind(Date.now(), Number(id), ctx.user.id)
     .run();
-  return settingsPage(ctx, { notice: 'Token revoked. That agent can no longer use the forum.' });
+  // Emergency switch: posts this agent still has in the hold window stop going live by themselves.
+  // They stay in the list for the member to publish or retract by hand.
+  await ctx.db
+    .prepare("UPDATE agent_drafts SET publish_at = NULL WHERE token_id = ? AND user_id = ? AND status = 'pending'")
+    .bind(Number(id), ctx.user.id)
+    .run();
+  return agentsPage(ctx, { notice: 'Token revoked. That agent can no longer use the forum, and its waiting posts will not go live on their own.' });
 });
 
 route('GET', '/drafts', async (ctx) => {
-  const { results } = await ctx.db
-    .prepare(
-      `SELECT d.*, t.label AS agent, tp.title AS topic_title FROM agent_drafts d
-       JOIN agent_tokens t ON t.id = d.token_id LEFT JOIN content tp ON tp.id = d.topic_id
-       WHERE d.user_id = ? AND d.status = 'pending' ORDER BY d.created_at, d.id`,
-    )
-    .bind(ctx.user.id)
-    .all();
-  return page(ctx, 'Agent drafts', V.draftsBody({ drafts: results }));
+  const [{ results: waiting }, { results: history }] = await Promise.all([
+    ctx.db
+      .prepare(
+        `SELECT d.*, t.label AS agent, tp.title AS topic_title FROM agent_drafts d
+         JOIN agent_tokens t ON t.id = d.token_id LEFT JOIN content tp ON tp.id = d.topic_id
+         WHERE d.user_id = ? AND d.status = 'pending' ORDER BY d.created_at, d.id`,
+      )
+      .bind(ctx.user.id)
+      .all(),
+    ctx.db
+      .prepare(
+        `SELECT d.*, t.label AS agent, tp.title AS topic_title FROM agent_drafts d
+         JOIN agent_tokens t ON t.id = d.token_id LEFT JOIN content tp ON tp.id = d.topic_id
+         WHERE d.user_id = ? AND d.status != 'pending' ORDER BY d.decided_at DESC, d.id DESC LIMIT 20`,
+      )
+      .bind(ctx.user.id)
+      .all(),
+  ]);
+  return page(ctx, 'Agent posts', V.draftsBody({ waiting, history, now: Date.now() }));
 });
 
 async function ownDraft(ctx, id) {
@@ -774,62 +818,106 @@ async function ownDraft(ctx, id) {
     .prepare('SELECT d.*, t.label AS agent FROM agent_drafts d JOIN agent_tokens t ON t.id = d.token_id WHERE d.id = ?')
     .bind(Number(id))
     .first();
-  if (!d || d.user_id !== ctx.user.id || d.status !== 'pending') return { res: await message(ctx, 'Not found', 'This draft does not exist or was already handled.', 404) };
+  if (!d || d.user_id !== ctx.user.id || d.status !== 'pending') return { res: await message(ctx, 'Not found', 'This post does not exist or was already handled.', 404) };
   return { d };
 }
 
-route('POST', '/drafts/(\\d+)/publish', async (ctx, id) => {
-  const { d, res } = await ownDraft(ctx, id);
-  if (res) return res;
-  // Re-validate: rules may have changed, and a reply's topic may be gone since the agent drafted it.
-  let v;
-  let topic = null;
+// Re-validates a held post just before it goes live: the rules may have changed, and a reply's topic may be gone.
+async function prepareHeld(db, d) {
   if (d.kind === 'topic') {
     const fields = { title: d.title ?? '', body: d.body, tags: d.tags };
-    v = validateTopic((key) => fields[key] ?? '');
-    if (!v.error) v = { ...v, body: v.values.body };
-  } else {
-    topic = await getContent(ctx.db, d.topic_id);
-    if (!visibleTo(ctx.user, topic) || topic.kind !== 'topic' || topic.deleted_at) {
-      return message(ctx, 'Cannot publish', 'The topic this reply was written for no longer exists. Discard the draft.', 400);
-    }
-    v = validateBody(d.body);
+    const v = validateTopic((key) => fields[key] ?? '');
+    return v.error ? { error: v.error } : { body: v.values.body, title: v.values.title, tags: v.tags, topic: null };
   }
-  if (v.error) return message(ctx, 'Cannot publish', `${v.error} Discard this draft.`, 400);
-  const flood = await floodCheck(ctx, v.body);
-  if (flood) return flood;
+  const topic = await getContent(db, d.topic_id);
+  if (!topic || topic.kind !== 'topic' || topic.deleted_at || topic.author_banned_at) {
+    return { error: 'The topic this reply was written for no longer exists.' };
+  }
+  const v = validateBody(d.body);
+  return v.error ? { error: v.error } : { body: v.body, topic };
+}
+
+// Publishes a held post as its owner. Returns null if someone else (the member, or the cron) already handled it.
+async function commitHeld(db, d, p) {
   const now = Date.now();
-  // Claim the draft first so a double click cannot publish it twice.
-  const claimed = await ctx.db
+  // Claim first so a double click, or a click racing the cron, cannot publish it twice.
+  const claimed = await db
     .prepare("UPDATE agent_drafts SET status = 'published', decided_at = ? WHERE id = ? AND status = 'pending' RETURNING id")
     .bind(now, d.id)
     .first();
-  if (!claimed) return message(ctx, 'Already handled', 'This draft was already published or discarded.', 409);
+  if (!claimed) return null;
   let row;
   if (d.kind === 'topic') {
-    row = await ctx.db
+    row = await db
       .prepare("INSERT INTO content (kind, author_id, title, body, lang, created_at, via_agent) VALUES ('topic', ?, ?, ?, ?, ?, ?) RETURNING id")
-      .bind(ctx.user.id, v.values.title, v.body, detectLang(v.values.title, v.body), now, d.agent)
+      .bind(d.user_id, p.title, p.body, detectLang(p.title, p.body), now, d.agent)
       .first();
-    await setTags(ctx.db, row.id, v.tags);
-    await markRead(ctx.db, ctx.user.id, row.id);
+    await setTags(db, row.id, p.tags);
+    await markRead(db, d.user_id, row.id);
   } else {
-    row = await ctx.db
+    row = await db
       .prepare("INSERT INTO content (kind, topic_id, author_id, body, lang, created_at, via_agent) VALUES ('reply', ?, ?, ?, ?, ?, ?) RETURNING id")
-      .bind(topic.id, ctx.user.id, v.body, detectLang(v.body), now, d.agent)
+      .bind(p.topic.id, d.user_id, p.body, detectLang(p.body), now, d.agent)
       .first();
-    await markRead(ctx.db, ctx.user.id, topic.id);
+    await markRead(db, d.user_id, p.topic.id);
   }
-  await ctx.db.prepare('UPDATE agent_drafts SET content_id = ? WHERE id = ?').bind(row.id, d.id).run();
-  return redirect(d.kind === 'topic' ? `/topic/${row.id}` : `/topic/${topic.id}#c${row.id}`);
+  await db.prepare('UPDATE agent_drafts SET content_id = ? WHERE id = ?').bind(row.id, d.id).run();
+  return { id: row.id, topicId: d.kind === 'topic' ? row.id : p.topic.id };
+}
+
+// "Publish now": skip the rest of the hold window.
+route('POST', '/drafts/(\\d+)/publish', async (ctx, id) => {
+  const { d, res } = await ownDraft(ctx, id);
+  if (res) return res;
+  const p = await prepareHeld(ctx.db, d);
+  if (p.error) return message(ctx, 'Cannot publish', `${p.error} Retract this post.`, 400);
+  const flood = await floodCheck(ctx, p.body);
+  if (flood) return flood;
+  const done = await commitHeld(ctx.db, d, p);
+  if (!done) return message(ctx, 'Already handled', 'This post was already published or retracted.', 409);
+  return redirect(d.kind === 'topic' ? `/topic/${done.id}` : `/topic/${done.topicId}#c${done.id}`);
 });
 
+// "Retract": the post never goes live.
 route('POST', '/drafts/(\\d+)/discard', async (ctx, id) => {
   const { d, res } = await ownDraft(ctx, id);
   if (res) return res;
-  await ctx.db.prepare("UPDATE agent_drafts SET status = 'discarded', decided_at = ? WHERE id = ? AND status = 'pending'").bind(Date.now(), d.id).run();
+  await ctx.db
+    .prepare("UPDATE agent_drafts SET status = 'discarded', decided_at = ?, note = 'Retracted by you.' WHERE id = ? AND status = 'pending'")
+    .bind(Date.now(), d.id)
+    .run();
   return redirect('/drafts');
 });
+
+// Cron, every minute: publish posts whose hold window ended. Anything that cannot go live is retracted with a note,
+// except posts blocked only by the posting limits, which wait and are retried (not recorded as limit hits).
+async function publishDueAgentPosts(env) {
+  const { results } = await env.DB
+    .prepare(
+      `SELECT d.*, t.label AS agent FROM agent_drafts d
+       JOIN agent_tokens t ON t.id = d.token_id JOIN users u ON u.id = d.user_id
+       WHERE d.status = 'pending' AND d.publish_at IS NOT NULL AND d.publish_at <= ? AND u.banned_at IS NULL
+       ORDER BY d.publish_at, d.id LIMIT 20`,
+    )
+    .bind(Date.now())
+    .all();
+  for (const d of results) {
+    const retract = (note) =>
+      env.DB.prepare("UPDATE agent_drafts SET status = 'discarded', decided_at = ?, note = ? WHERE id = ? AND status = 'pending'").bind(Date.now(), note, d.id).run();
+    const p = await prepareHeld(env.DB, d);
+    if (p.error) {
+      await retract(`Not published: ${p.error}`);
+      continue;
+    }
+    const flood = await floodReason(env, env.DB, d.user_id, p.body);
+    if (flood && flood.reason === 'dupe') {
+      await retract('Not published: you already posted this text in the last 24 hours.');
+      continue;
+    }
+    if (flood) continue;
+    await commitHeld(env.DB, d, p);
+  }
+}
 
 // ----- JSON API for agents: Authorization: Bearer ad_... (see /agents.md) -----
 
@@ -894,21 +982,23 @@ async function handleApi(request, env, url) {
       replies,
     });
   }
-  if (method === 'POST' && path === '/api/v1/drafts') return createDraft(request, db, url, agent, now);
-  if (method === 'GET' && (m = path.match(/^\/api\/v1\/drafts\/(\d+)$/))) {
+  if (method === 'POST' && /^\/api\/v1\/(posts|drafts)$/.test(path)) return createDraft(request, env, url, agent, now);
+  if (method === 'GET' && (m = path.match(/^\/api\/v1\/(?:posts|drafts)\/(\d+)$/))) {
     const d = await db
-      .prepare('SELECT id, kind, status, topic_id, content_id FROM agent_drafts WHERE id = ? AND user_id = ?')
+      .prepare('SELECT id, kind, status, topic_id, content_id, publish_at, note FROM agent_drafts WHERE id = ? AND user_id = ?')
       .bind(Number(m[1]), agent.user_id)
       .first();
-    if (!d) return apiError(404, 'Draft not found.');
+    if (!d) return apiError(404, 'Post not found.');
     const published = d.status === 'published' && d.content_id;
     const link = !published ? undefined : d.kind === 'topic' ? `${url.origin}/topic/${d.content_id}` : `${url.origin}/topic/${d.topic_id}#c${d.content_id}`;
-    return json({ id: d.id, status: d.status, url: link });
+    const goesLive = d.status === 'pending' && d.publish_at ? new Date(d.publish_at).toISOString() : undefined;
+    return json({ id: d.id, status: d.status, goes_live_at: goesLive, url: link, note: d.note || undefined });
   }
   return apiError(404, 'Unknown endpoint. See /agents.md.');
 }
 
-async function createDraft(request, db, url, agent, now) {
+async function createDraft(request, env, url, agent, now) {
+  const db = env.DB;
   const text = await request.text();
   if (text.length > API_BODY_MAX) return apiError(413, 'Request body is too large.');
   let data;
@@ -919,6 +1009,12 @@ async function createDraft(request, db, url, agent, now) {
   }
   if (!data || typeof data !== 'object' || Array.isArray(data)) return apiError(400, 'Body must be a JSON object.');
   const str = (key) => (typeof data[key] === 'string' ? data[key] : '');
+  // The summary is for the owner, not public: what the agent did and why it is posting.
+  const summary = str('summary').replace(/\s+/g, ' ').trim();
+  if (!summary) {
+    return apiError(400, `summary is required: in one to three sentences, tell your owner what you did and why you are posting (at most ${SUMMARY_MAX} characters).`);
+  }
+  if (charLen(summary) > SUMMARY_MAX) return apiError(400, `summary must be at most ${SUMMARY_MAX} characters.`);
   const tagsIn = Array.isArray(data.tags) ? data.tags.filter((t) => typeof t === 'string').join(',') : str('tags');
 
   let draft;
@@ -936,27 +1032,30 @@ async function createDraft(request, db, url, agent, now) {
     return apiError(400, 'kind must be "topic" or "reply".');
   }
 
+  const { holdSeconds, dailyLimit } = agentLimits(env);
   const row = await db
     .prepare(
       `SELECT COALESCE(SUM(status = 'pending'), 0) AS pending, COALESCE(SUM(created_at > ?1), 0) AS last_min,
-         COALESCE(SUM(status = 'pending' AND body = ?3), 0) AS dupes
-       FROM agent_drafts WHERE user_id = ?2 AND (status = 'pending' OR created_at > ?1)`,
+         COALESCE(SUM(created_at > ?4), 0) AS last_day, COALESCE(SUM(status = 'pending' AND body = ?3), 0) AS dupes
+       FROM agent_drafts WHERE user_id = ?2 AND (status = 'pending' OR created_at > ?4)`,
     )
-    .bind(now - 60_000, agent.user_id, draft.body)
+    .bind(now - 60_000, agent.user_id, draft.body, now - DAY_MS)
     .first();
-  if (row.dupes > 0) return apiError(409, 'You already submitted this text and it is waiting for review.');
-  if (row.last_min >= DRAFTS_PER_MIN) return apiError(429, `At most ${DRAFTS_PER_MIN} drafts per minute. Wait before sending more.`);
+  if (row.dupes > 0) return apiError(409, 'You already submitted this text and it is waiting to go live.');
+  if (row.last_min >= DRAFTS_PER_MIN) return apiError(429, `At most ${DRAFTS_PER_MIN} posts per minute. Wait before sending more.`);
   if (row.pending >= MAX_PENDING_DRAFTS) {
-    return apiError(429, `${MAX_PENDING_DRAFTS} drafts are already waiting for your owner's review. Wait until they are handled.`);
+    return apiError(429, `${MAX_PENDING_DRAFTS} posts are already waiting to go live. Wait until they are handled.`);
   }
+  if (row.last_day >= dailyLimit) return apiError(429, `Your owner's agents may submit at most ${dailyLimit} posts per 24 hours. Try again later.`);
+  const publishAt = now + holdSeconds * 1000;
   const { id } = await db
     .prepare(
-      `INSERT INTO agent_drafts (user_id, token_id, kind, topic_id, title, body, tags, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+      `INSERT INTO agent_drafts (user_id, token_id, kind, topic_id, title, body, tags, summary, publish_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     )
-    .bind(agent.user_id, agent.token_id, draft.kind, draft.topicId, draft.title, draft.body, draft.tags, now)
+    .bind(agent.user_id, agent.token_id, draft.kind, draft.topicId, draft.title, draft.body, draft.tags, summary, publishAt, now)
     .first();
-  return json({ id, status: 'pending', review_url: `${url.origin}/drafts` }, 201);
+  return json({ id, status: 'pending', goes_live_at: new Date(publishAt).toISOString(), review_url: `${url.origin}/drafts` }, 201);
 }
 
 // ---------- admin ----------

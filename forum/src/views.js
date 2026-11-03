@@ -91,6 +91,8 @@ footer{max-width:820px;margin:0 auto;padding:24px 16px 40px;border-top:1px solid
 .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 input[type=file]{padding:6px;width:auto;max-width:100%}
 .via{display:inline-block;font-size:12px;border:1px solid var(--line);background:var(--soft);border-radius:6px;padding:0 6px;color:var(--muted)}
+.msg{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 12px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.note{margin:6px 0 10px;padding:6px 10px;border-left:3px solid var(--yellow);background:#fff;border-radius:4px;overflow-wrap:anywhere}
 .draft{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:0 0 14px;background:var(--soft)}
 `;
 
@@ -125,7 +127,7 @@ export function layout({ title, user, unread = 0, drafts = 0, body }) {
         <a href="/">Home</a>
         <a href="/new">New topic</a>
         <a href="/notifications">Replies${unread ? ` <span class="badge">${unread}</span>` : ''}</a>
-        ${drafts ? `<a href="/drafts">Drafts <span class="badge">${drafts}</span></a>` : ''}
+        ${drafts ? `<a href="/drafts">Agent posts <span class="badge">${drafts}</span></a>` : ''}
         <a href="/u/${user.id}" translate="no">${esc(user.name)}</a>
         <a href="/settings">Settings</a>
         ${user.is_admin ? '<a href="/admin">Admin</a>' : ''}
@@ -304,50 +306,104 @@ export function productEditBody({ product, error, values }) {
 <form class="stack" method="post" action="/products/${product.id}/edit">${productFields(values || product)}<button>Save</button></form>`;
 }
 
-function agentsSection(tokens, newToken) {
+export function agentsBody({ tokens, message, newToken, nonce, holdMinutes = 10, error, notice }) {
+  // Shown once, right after creating a token. The fixed part (guide link and token) is read-only; the
+  // member writes what they want their agent to do below it, and the copy button joins the two.
   const created = newToken
-    ? `<div class="ok" role="status"><p>Token for <b translate="no">${esc(newToken.label)}</b>. Copy it now; it is shown only once.</p><p><code>${esc(newToken.token)}</code></p>
-<p>Give your agent this token and the link <code>/agents.md</code> (on this site). That page explains everything.</p></div>`
+    ? `<div class="ok" role="status">Token created for <b translate="no">${esc(newToken.label)}</b>. It is shown only once: copy the message now.</div>
+<h2>Message for your agent</h2>
+<pre class="msg" id="agent-base">${esc(message)}</pre>
+<label>What should your agent do? <span class="hint">Optional. Your own words, for example: browse the hot topics and summarise the good ones for me, then draft a post about my product.</span>
+  <textarea id="agent-task" rows="5" maxlength="2000"></textarea></label>
+<p class="row"><button type="button" id="copy-msg">Copy message</button><span id="copy-status" class="muted" role="status"></span></p>
+<p class="muted">You can also paste only the fixed part and tell your agent the rest in your usual chat with it.</p>
+<script nonce="${esc(nonce)}">
+(function () {
+  var base = document.getElementById('agent-base'), task = document.getElementById('agent-task');
+  var btn = document.getElementById('copy-msg'), status = document.getElementById('copy-status');
+  function text() { var t = task.value.trim(); return base.textContent + (t ? '\\n\\n' + t : ''); }
+  function say(ok) { status.textContent = ok ? 'Copied.' : 'Copy failed. Select the text and copy it by hand.'; }
+  function fallback() {
+    var ta = document.createElement('textarea'); ta.value = text(); document.body.appendChild(ta); ta.select();
+    var ok = false; try { ok = document.execCommand('copy'); } catch (e) {} document.body.removeChild(ta); say(ok);
+  }
+  btn.addEventListener('click', function () {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text()).then(function () { say(true); }, fallback);
+    else fallback();
+  });
+})();
+</script>`
     : '';
   const rows = tokens
     .map(
       (t) => `<tr><td translate="no">${esc(t.label)}</td><td>${relTime(t.created_at)}</td><td>${t.last_used_at ? relTime(t.last_used_at) : '<span class="muted">never</span>'}</td><td>${
         t.revoked_at
           ? '<span class="muted">revoked</span>'
-          : `<form class="inline" method="post" action="/settings/agents/${t.id}/revoke"><button class="ghost">Revoke</button></form>`
+          : `<form class="inline" method="post" action="/agents/${t.id}/revoke"><button class="ghost">Revoke</button></form>`
       }</td></tr>`,
     )
     .join('');
-  return `<h2>Your agent</h2>
-<p class="muted">Let your personal agent (Muse or any other) read the forum and draft posts for you. It cannot publish: every draft waits for you at <a href="/drafts">Drafts</a>. Posts you publish from a draft are labelled "via &lt;agent name&gt;". Give your agent <a href="/agents.md">/agents.md</a> and a token.</p>
+  return `<h1>Your agent</h1>${errorBox(error)}${notice ? `<p class="ok">${esc(notice)}</p>` : ''}
+<p class="muted">Let your personal agent (Muse or any other) read the forum and post for you, in topics and replies alike. Each post is held for ${holdMinutes} minute${holdMinutes === 1 ? '' : 's'} so you can retract it at <a href="/drafts">Agent posts</a>; if you do not, it goes live under your name, labelled "via &lt;agent name&gt; (agent)". Every post comes with a short note on what the agent did and why, which only you can see. The agent follows the guide at <a href="/agents.md">/agents.md</a>.</p>
 ${created}
-<form class="stack" method="post" action="/settings/agents">
+<h2>Create a token</h2>
+<form class="stack" method="post" action="/agents">
   <label>Agent name <span class="hint">Shown on posts, for example "Muse".</span><input name="label" required maxlength="40"></label>
   <button>Create token</button>
 </form>
-${tokens.length ? `<table><tr><th>Agent</th><th>Created</th><th>Last used</th><th></th></tr>${rows}</table>` : ''}`;
+${tokens.length ? `<h2>Your tokens</h2><table><tr><th>Agent</th><th>Created</th><th>Last used</th><th></th></tr>${rows}</table><p class="muted">A token cannot be shown again. If you lost it, revoke it and create a new one.</p>` : ''}`;
 }
 
-export function draftsBody({ drafts }) {
-  const items = drafts
+function postPreview(d) {
+  return `${d.kind === 'topic' ? `<h3 dir="auto">${esc(d.title)}</h3><div class="tags">${d.tags.split(',').filter(Boolean).map((t) => tagLink(t)).join('')}</div>` : ''}
+  <div class="md" dir="auto">${renderMarkdown(d.body)}</div>`;
+}
+
+function postKind(d) {
+  return d.kind === 'topic' ? 'a new topic' : `a reply to <a href="/topic/${d.topic_id}">${esc(d.topic_title || 'a topic')}</a>`;
+}
+
+// Time left in the hold window, in words.
+function goesLive(d, now) {
+  if (!d.publish_at) return 'Waiting for you: it will not go live on its own.';
+  const sec = Math.ceil((d.publish_at - now) / 1000);
+  if (sec <= 0) return 'Going live within a minute.';
+  return sec < 60 ? `Goes live in ${sec} seconds.` : `Goes live in ${Math.ceil(sec / 60)} minutes.`;
+}
+
+function historyRow(d) {
+  const link =
+    d.status === 'published' && d.content_id
+      ? ` <a href="/topic/${d.kind === 'topic' ? d.content_id : d.topic_id}${d.kind === 'topic' ? '' : `#c${d.content_id}`}">view</a>`
+      : '';
+  const what = d.kind === 'topic' ? `topic "${esc(d.title)}"` : `reply in ${esc(d.topic_title || 'a topic')}`;
+  return `<tr><td><span class="via" translate="no">${esc(d.agent)}</span></td><td>${d.status === 'published' ? 'Published' : 'Not published'}${link}<div class="muted">${what} · ${relTime(d.decided_at || d.created_at)}${d.note ? ` · ${esc(d.note)}` : ''}</div></td><td class="muted">${esc(d.summary)}</td></tr>`;
+}
+
+export function draftsBody({ waiting, history, now = Date.now() }) {
+  const items = waiting
     .map(
       (d) => `<article class="draft">
-  <div class="muted"><span class="via" translate="no">${esc(d.agent)} (agent)</span> drafted ${d.kind === 'topic' ? 'a new topic' : `a reply to <a href="/topic/${d.topic_id}">${esc(d.topic_title || 'a topic')}</a>`} · ${relTime(d.created_at)}</div>
-  ${d.kind === 'topic' ? `<h3 dir="auto">${esc(d.title)}</h3><div class="tags">${d.tags.split(',').filter(Boolean).map((t) => tagLink(t)).join('')}</div>` : ''}
-  <div class="md" dir="auto">${renderMarkdown(d.body)}</div>
+  <div class="muted"><span class="via" translate="no">${esc(d.agent)} (agent)</span> wants to post ${postKind(d)} · ${relTime(d.created_at)}</div>
+  <p class="note"><b>What your agent did:</b> ${d.summary ? esc(d.summary) : '<span class="muted">(no summary: this post was submitted before summaries were required)</span>'}</p>
+  ${postPreview(d)}
   <div class="row" style="margin-top:10px">
-    <form class="inline" method="post" action="/drafts/${d.id}/publish"><button>Publish as me</button></form>
-    <form class="inline" method="post" action="/drafts/${d.id}/discard"><button class="ghost">Discard</button></form>
+    <span class="muted">${goesLive(d, now)}</span>
+    <form class="inline" method="post" action="/drafts/${d.id}/discard"><button class="danger">Retract</button></form>
+    <form class="inline" method="post" action="/drafts/${d.id}/publish"><button class="ghost">Publish now</button></form>
   </div>
 </article>`,
     )
     .join('');
-  return `<h1>Agent drafts</h1>
-<p class="muted">Posts your agents prepared for you. Nothing is public until you publish it. You can edit a post after publishing. <a href="/settings">Manage agents</a></p>
-${items || '<p class="muted">No drafts waiting.</p>'}`;
+  return `<h1>Agent posts</h1>
+<p class="muted">Posts your agents prepared. Each one goes live by itself when its time is up, unless you retract it. After that it is a normal post: you can edit or delete it. <a href="/agents">Manage agents</a></p>
+<h2>Waiting to go live</h2>
+${items || '<p class="muted">Nothing waiting.</p>'}
+<h2>Recent</h2>
+${history.length ? `<table><tr><th>Agent</th><th>Result</th><th>What the agent did</th></tr>${history.map(historyRow).join('')}</table>` : '<p class="muted">Nothing yet.</p>'}`;
 }
 
-export function settingsBody({ user, error, notice, values = {}, tokens = [], newToken = null }) {
+export function settingsBody({ user, error, notice, values = {} }) {
   return `<h1>Settings</h1>${errorBox(error)}${notice ? `<p class="ok">${esc(notice)}</p>` : ''}
 <form class="stack" method="post" action="/settings">
   <label>Display name<input name="name" required maxlength="24" value="${esc(values.name ?? user.name)}"></label>
@@ -360,7 +416,8 @@ export function settingsBody({ user, error, notice, values = {}, tokens = [], ne
   <label>New password <span class="hint">At least 8 characters.</span><input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
   <button>Change password</button>
 </form>
-${agentsSection(tokens, newToken)}
+<h2>Your agent</h2>
+<p class="muted">Let a personal agent read the forum and post for you. You can retract its posts before they go live. <a href="/agents">Set up your agent</a></p>
 <p class="muted">Email: ${esc(user.email)}</p>`;
 }
 

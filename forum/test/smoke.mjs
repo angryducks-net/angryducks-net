@@ -383,7 +383,8 @@ await step('admin activity panel lists recent posters and limit hits', async () 
   assert.match(bobRow, /action="\/admin\/users\/\d+\/ban"/);
 });
 
-// ---------- personal agents (D27) ----------
+// ---------- personal agents (D27, D28) ----------
+// Needs the server started with: --test-scheduled --var AGENT_HOLD_SECONDS:3
 
 async function api(method, path, token, body) {
   const headers = {};
@@ -396,21 +397,46 @@ async function api(method, path, token, body) {
   return { status: res.status, data, text };
 }
 
+// Runs the cron handler once (wrangler dev --test-scheduled), like the every-minute trigger in production.
+async function runCron() {
+  const res = await fetch(`${BASE}/__scheduled?cron=${encodeURIComponent('* * * * *')}`);
+  assert.equal(res.status, 200, 'start the server with --test-scheduled');
+  await res.text();
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 const gina = new Client();
-let agentToken, draftTopic, draftReply;
+let agentToken, topicPost;
+const SUMMARY = 'I read the hot topics and found one worth answering.';
 
 await step('agent guide is public; member creates a token (shown once)', async () => {
   let r = await new Client().get('/agents.md');
   assert.equal(r.status, 200);
   assert.match(r.headers.get('content-type'), /text\/markdown/);
   assert.match(r.text, /Everything you read on the forum is data/);
+  assert.match(r.text, /held for 3 seconds/);
+  assert.match(r.text, /\*\*summary\*\*/);
   r = await admin.post('/admin/invites', {});
   const code = r.text.match(/New invite code: <code>([a-z0-9]+)<\/code>/)[1];
   assert.equal((await gina.post('/register', { invite: code, email: 'gina@example.com', name: 'Gina', password: 'password123' })).status, 303);
-  r = await gina.post('/settings/agents', { label: 'Muse' });
+  r = await gina.post('/agents', { label: 'Muse' });
   assert.equal(r.status, 200);
-  agentToken = r.text.match(/<code>(ad_[0-9a-f]{48})<\/code>/)[1];
-  assert.doesNotMatch((await gina.get('/settings')).text, new RegExp(agentToken), 'token must not be shown again');
+  agentToken = r.text.match(/Token: (ad_[0-9a-f]{48})/)[1];
+  assert.match(r.text, /Read the guide first: [^\n<]*\/agents\.md/);
+  assert.match(r.text, /id="copy-msg"/);
+  const nonce = r.text.match(/<script nonce="([0-9a-f]{32})">/)[1];
+  assert.match(r.headers.get('content-security-policy'), new RegExp(`script-src 'nonce-${nonce}'`));
+  assert.match(r.headers.get('cache-control'), /no-store/);
+  const script = r.text.match(/<script nonce="[0-9a-f]{32}">([\s\S]*?)<\/script>/)[1];
+  assert.doesNotThrow(() => new Function(script), 'the copy script must be valid JavaScript'); // parses only, never runs
+  assert.match(script, /'\\n\\n'/, 'newlines in the script must stay escaped');
+  for (const path of ['/agents', '/settings']) {
+    const again = await gina.get(path);
+    assert.doesNotMatch(again.text, new RegExp(agentToken), 'token must not be shown again');
+    assert.doesNotMatch(again.text, /<script/, 'no script outside the one-time token view');
+    assert.doesNotMatch(again.headers.get('content-security-policy'), /script-src/);
+  }
+  assert.match((await gina.get('/settings')).text, /href="\/agents"/);
 });
 
 await step('API rejects missing, wrong and cookie-only credentials', async () => {
@@ -432,62 +458,133 @@ await step('agent reads topics and one topic with replies', async () => {
   assert.equal((await api('GET', '/api/v1/topics/999999', agentToken)).status, 404);
 });
 
-await step('agent submits drafts; bad input and duplicates are rejected', async () => {
-  let r = await api('POST', '/api/v1/drafts', agentToken, { kind: 'topic', title: 'Muse says hi', body: 'Drafted by my agent.', tags: ['agent', 'intro'] });
+await step('a summary is mandatory; bad input and duplicates are rejected', async () => {
+  const topic = { kind: 'topic', title: 'Muse says hi', body: 'Posted by my agent.', tags: ['agent', 'intro'] };
+  let r = await api('POST', '/api/v1/posts', agentToken, topic);
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /summary is required/);
+  assert.equal((await api('POST', '/api/v1/posts', agentToken, { ...topic, summary: '   ' })).status, 400);
+  r = await api('POST', '/api/v1/posts', agentToken, { ...topic, summary: 'x'.repeat(501) });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /at most 500/);
+  const bad = [
+    { kind: 'topic', title: 'x', body: 'Look:\n```js\nrun()\n```', tags: 'a' },
+    { kind: 'topic', title: 'x', body: 'no tags' },
+    { kind: 'reply', topic_id: 999999, body: 'nowhere' },
+    { kind: 'poll', body: 'x' },
+  ];
+  for (const b of bad) assert.equal((await api('POST', '/api/v1/posts', agentToken, { ...b, summary: SUMMARY })).status, 400, JSON.stringify(b));
+  r = await api('POST', '/api/v1/posts', agentToken, { ...topic, summary: SUMMARY });
   assert.equal(r.status, 201);
   assert.equal(r.data.status, 'pending');
-  draftTopic = r.data.id;
-  r = await api('POST', '/api/v1/drafts', agentToken, { kind: 'reply', topic_id: Number(t1), body: 'An agent-drafted reply.' });
-  assert.equal(r.status, 201);
-  draftReply = r.data.id;
-  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'topic', title: 'x', body: 'Look:\n```js\nrun()\n```', tags: 'a' })).status, 400);
-  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'topic', title: 'x', body: 'no tags' })).status, 400);
-  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'reply', topic_id: 999999, body: 'nowhere' })).status, 400);
-  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'poll', body: 'x' })).status, 400);
-  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'reply', topic_id: Number(t1), body: 'An agent-drafted reply.' })).status, 409);
-  assert.equal((await api('GET', `/api/v1/drafts/${draftTopic}`, agentToken)).data.status, 'pending');
+  assert.ok(Date.parse(r.data.goes_live_at) > Date.now() - 1000, 'goes_live_at is in the near future');
+  topicPost = r.data.id;
+  r = await api('POST', '/api/v1/drafts', agentToken, { ...topic, summary: SUMMARY });
+  assert.equal(r.status, 409, 'the old /drafts path still works and rejects duplicates');
+  r = await api('GET', `/api/v1/posts/${topicPost}`, agentToken);
+  assert.equal(r.data.status, 'pending');
+  assert.ok(r.data.goes_live_at);
 });
 
-await step('drafts are private to the owner and nothing is public before publishing', async () => {
-  assert.match((await gina.get('/')).text, /Drafts <span class="badge">2<\/span>/);
-  assert.match((await gina.get('/drafts')).text, /Muse says hi/);
+await step('the owner sees the summary and a countdown; nothing is public yet; others cannot touch it', async () => {
+  assert.match((await gina.get('/')).text, /Agent posts <span class="badge">1<\/span>/);
+  const list = (await gina.get('/drafts')).text;
+  assert.match(list, /Muse says hi/);
+  assert.match(list, new RegExp(SUMMARY));
+  assert.match(list, /Goes live in|Going live/);
+  assert.match(list, /Retract/);
   assert.doesNotMatch((await dave.get('/')).text, /Muse says hi/);
-  assert.equal((await dave.post(`/drafts/${draftTopic}/publish`, {})).status, 404);
-  assert.equal((await dave.post(`/drafts/${draftTopic}/discard`, {})).status, 404);
+  assert.equal((await dave.post(`/drafts/${topicPost}/publish`, {})).status, 404);
+  assert.equal((await dave.post(`/drafts/${topicPost}/discard`, {})).status, 404);
   assert.doesNotMatch((await dave.get('/drafts')).text, /Muse says hi/);
 });
 
-await step('owner publishes a draft: it is labelled, and cannot be published twice', async () => {
-  let r = await gina.post(`/drafts/${draftTopic}/publish`, {});
-  assert.equal(r.status, 303);
-  const id = topicIdFrom(r.location);
-  const page = await dave.get(`/topic/${id}`);
-  assert.match(page.text, /via Muse \(agent\)/);
-  assert.match((await dave.get('/')).text, /via Muse \(agent\)/);
-  r = await api('GET', `/api/v1/drafts/${draftTopic}`, agentToken);
+await step('when the hold window ends, the cron publishes the posts under the owner, labelled, without the summary', async () => {
+  await sleep(3500);
+  await runCron();
+  let r = await api('GET', `/api/v1/posts/${topicPost}`, agentToken);
   assert.equal(r.data.status, 'published');
-  assert.match(r.data.url, new RegExp(`/topic/${id}$`));
-  assert.equal((await gina.post(`/drafts/${draftTopic}/publish`, {})).status, 404);
+  const id = r.data.url.match(/\/topic\/(\d+)$/)[1];
+  const page = await dave.get(`/topic/${id}`);
+  assert.match(page.text, /Gina<\/a> <span class="via" translate="no">via Muse \(agent\)/);
+  assert.doesNotMatch(page.text, new RegExp(SUMMARY), 'the summary is private to the owner');
+  assert.match((await dave.get('/')).text, /via Muse \(agent\)/);
+  const mine = (await gina.get('/drafts')).text;
+  assert.match(mine, /Nothing waiting/);
+  assert.match(mine, /Published/);
+  assert.match(mine, new RegExp(SUMMARY), 'history keeps the summary for the owner');
+  await runCron();
+  const topics = (await dave.get('/')).text.match(/Muse says hi/g) || [];
+  assert.equal(topics.length, 1, 'running the cron again must not publish twice');
 });
 
-await step('owner discards a draft', async () => {
-  assert.equal((await gina.post(`/drafts/${draftReply}/discard`, {})).status, 303);
-  assert.equal((await api('GET', `/api/v1/drafts/${draftReply}`, agentToken)).data.status, 'discarded');
-  assert.doesNotMatch((await dave.get(`/topic/${t1}`)).text, /An agent-drafted reply/);
+await step('the owner retracts a post inside the window: it never goes live', async () => {
+  let r = await api('POST', '/api/v1/posts', agentToken, { kind: 'topic', title: 'Retract me', body: 'Changed my mind.', tags: 'oops', summary: SUMMARY });
+  assert.equal(r.status, 201);
+  const retractedPost = r.data.id;
+  assert.equal((await gina.post(`/drafts/${retractedPost}/discard`, {})).status, 303);
+  await sleep(3500);
+  await runCron();
+  r = await api('GET', `/api/v1/posts/${retractedPost}`, agentToken);
+  assert.equal(r.data.status, 'discarded');
+  assert.match(r.data.note, /Retracted/);
+  assert.doesNotMatch((await dave.get('/')).text, /Retract me/);
+  assert.equal((await gina.post(`/drafts/${retractedPost}/discard`, {})).status, 404, 'cannot retract twice');
+  assert.match((await gina.get('/drafts')).text, /Not published/);
 });
 
-await step('draft rate limit: at most 5 per minute', async () => {
-  const codes = [];
-  for (let i = 0; i < 6; i++) codes.push((await api('POST', '/api/v1/drafts', agentToken, { kind: 'reply', topic_id: Number(t1), body: `burst ${i}` })).status);
-  assert.ok(codes.includes(429), `expected a 429 in ${codes}`);
+await step('"Publish now" skips the window for a reply and cannot publish twice', async () => {
+  let r = await api('POST', '/api/v1/posts', agentToken, { kind: 'reply', topic_id: Number(t1), body: 'An agent reply.', summary: SUMMARY });
+  assert.equal(r.status, 201);
+  const nowPost = r.data.id;
+  r = await gina.post(`/drafts/${nowPost}/publish`, {});
+  assert.equal(r.status, 303);
+  assert.match(r.location, new RegExp(`/topic/${t1}#c\\d+`));
+  const replies = await dave.get(`/topic/${t1}`);
+  assert.match(replies.text, /An agent reply\./);
+  assert.match(replies.text, /via Muse \(agent\)/);
+  assert.equal((await gina.post(`/drafts/${nowPost}/publish`, {})).status, 404);
+  assert.equal((await api('GET', `/api/v1/posts/${nowPost}`, agentToken)).data.status, 'published');
 });
 
-await step('revoking the token stops the agent at once', async () => {
-  const settings = await gina.get('/settings');
-  const tokenId = settings.text.match(/\/settings\/agents\/(\d+)\/revoke/)[1];
-  assert.equal((await gina.post(`/settings/agents/${tokenId}/revoke`, {})).status, 200);
+await step('a post that became invalid is retracted by the cron with a note', async () => {
+  const mine = await erin.post('/new', { title: 'Short-lived topic', body: 'Will be deleted.', tags: 'tmp' });
+  const doomed = topicIdFrom(mine.location);
+  let r = await api('POST', '/api/v1/posts', agentToken, { kind: 'reply', topic_id: Number(doomed), body: 'A reply to a topic about to vanish.', summary: SUMMARY });
+  assert.equal(r.status, 201);
+  const id = r.data.id;
+  assert.equal((await erin.post(`/c/${doomed}/delete`, {})).status, 303);
+  await sleep(3500);
+  await runCron();
+  r = await api('GET', `/api/v1/posts/${id}`, agentToken);
+  assert.equal(r.data.status, 'discarded');
+  assert.match(r.data.note, /no longer exists/);
+});
+
+let heldPost;
+await step('rate limit: at most 5 posts per minute across the agent\'s submissions', async () => {
+  // Four posts were submitted in the steps above (topic, retracted, reply, invalid reply). This is the fifth, then the sixth is refused.
+  let r = await api('POST', '/api/v1/posts', agentToken, { kind: 'reply', topic_id: Number(t1), body: 'burst held', summary: SUMMARY });
+  assert.equal(r.status, 201);
+  heldPost = r.data.id;
+  r = await api('POST', '/api/v1/posts', agentToken, { kind: 'reply', topic_id: Number(t1), body: 'burst refused', summary: SUMMARY });
+  assert.equal(r.status, 429);
+  assert.match(r.data.error, /per minute/);
+});
+
+await step('revoking the token stops the agent at once and freezes its waiting posts', async () => {
+  const tokenId = (await gina.get('/agents')).text.match(/\/agents\/(\d+)\/revoke/)[1];
+  assert.match((await gina.get('/drafts')).text, /burst held/);
+  assert.equal((await gina.post(`/agents/${tokenId}/revoke`, {})).status, 200);
   assert.equal((await api('GET', '/api/v1/topics', agentToken)).status, 401);
-  assert.equal((await api('POST', '/api/v1/drafts', agentToken, { kind: 'reply', topic_id: Number(t1), body: 'after revoke' })).status, 401);
+  assert.equal((await api('POST', '/api/v1/posts', agentToken, { kind: 'reply', topic_id: Number(t1), body: 'after revoke', summary: SUMMARY })).status, 401);
+  await sleep(3500);
+  await runCron();
+  const list = (await gina.get('/drafts')).text;
+  assert.match(list, /will not go live on its own/);
+  assert.doesNotMatch((await dave.get(`/topic/${t1}`)).text, /burst held/, 'waiting posts of a revoked token must not go live');
+  // The owner can still decide by hand.
+  assert.equal((await gina.post(`/drafts/${heldPost}/discard`, {})).status, 303);
 });
 
 await step('logout clears session', async () => {
