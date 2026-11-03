@@ -756,7 +756,8 @@ async function agentsPage(ctx, opts = {}, status = 200) {
   if (opts.newToken) headers['Content-Security-Policy'] = `${SECURITY_HEADERS['Content-Security-Policy']}; script-src 'nonce-${nonce}'`;
   const message = opts.newToken ? agentMessage(ctx.url.origin, opts.newToken.token) : null;
   const holdMinutes = Math.max(1, Math.round(agentLimits(ctx.env).holdSeconds / 60));
-  return page(ctx, 'Your agent', V.agentsBody({ tokens, message, nonce, holdMinutes, ...opts }), status, headers);
+  const waiting = await pendingDraftCount(ctx.db, ctx.user.id);
+  return page(ctx, 'Your agent', V.agentsBody({ tokens, message, nonce, holdMinutes, waiting, ...opts }), status, headers);
 }
 
 route('GET', '/agents', (ctx) => agentsPage(ctx));

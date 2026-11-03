@@ -436,7 +436,9 @@ await step('agent guide is public; member creates a token (shown once)', async (
     assert.doesNotMatch(again.text, /<script/, 'no script outside the one-time token view');
     assert.doesNotMatch(again.headers.get('content-security-policy'), /script-src/);
   }
-  assert.match((await gina.get('/settings')).text, /href="\/agents"/);
+  const settings = (await gina.get('/settings')).text;
+  assert.match(settings, /<nav>[\s\S]*<a href="\/agents">Agent<\/a>/, 'Agent is a top-level menu item');
+  assert.doesNotMatch(settings, /Your agent/, 'the agent section no longer lives in Settings');
 });
 
 await step('API rejects missing, wrong and cookie-only credentials', async () => {
@@ -487,7 +489,8 @@ await step('a summary is mandatory; bad input and duplicates are rejected', asyn
 });
 
 await step('the owner sees the summary and a countdown; nothing is public yet; others cannot touch it', async () => {
-  assert.match((await gina.get('/')).text, /Agent posts <span class="badge">1<\/span>/);
+  assert.match((await gina.get('/')).text, /Agent <span class="badge">1<\/span>/);
+  assert.match((await gina.get('/agents')).text, /<b>1 post<\/b> from your agents is waiting to go live/);
   const list = (await gina.get('/drafts')).text;
   assert.match(list, /Muse says hi/);
   assert.match(list, new RegExp(SUMMARY));

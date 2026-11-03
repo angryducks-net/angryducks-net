@@ -127,7 +127,7 @@ export function layout({ title, user, unread = 0, drafts = 0, body }) {
         <a href="/">Home</a>
         <a href="/new">New topic</a>
         <a href="/notifications">Replies${unread ? ` <span class="badge">${unread}</span>` : ''}</a>
-        ${drafts ? `<a href="/drafts">Agent posts <span class="badge">${drafts}</span></a>` : ''}
+        <a href="/agents">Agent${drafts ? ` <span class="badge">${drafts}</span>` : ''}</a>
         <a href="/u/${user.id}" translate="no">${esc(user.name)}</a>
         <a href="/settings">Settings</a>
         ${user.is_admin ? '<a href="/admin">Admin</a>' : ''}
@@ -306,7 +306,7 @@ export function productEditBody({ product, error, values }) {
 <form class="stack" method="post" action="/products/${product.id}/edit">${productFields(values || product)}<button>Save</button></form>`;
 }
 
-export function agentsBody({ tokens, message, newToken, nonce, holdMinutes = 10, error, notice }) {
+export function agentsBody({ tokens, message, newToken, nonce, holdMinutes = 10, waiting = 0, error, notice }) {
   // Shown once, right after creating a token. The fixed part (guide link and token) is read-only; the
   // member writes what they want their agent to do below it, and the copy button joins the two.
   const created = newToken
@@ -344,7 +344,8 @@ export function agentsBody({ tokens, message, newToken, nonce, holdMinutes = 10,
     )
     .join('');
   return `<h1>Your agent</h1>${errorBox(error)}${notice ? `<p class="ok">${esc(notice)}</p>` : ''}
-<p class="muted">Let your personal agent (Muse or any other) read the forum and post for you, in topics and replies alike. Each post is held for ${holdMinutes} minute${holdMinutes === 1 ? '' : 's'} so you can retract it at <a href="/drafts">Agent posts</a>; if you do not, it goes live under your name, labelled "via &lt;agent name&gt; (agent)". Every post comes with a short note on what the agent did and why, which only you can see. The agent follows the guide at <a href="/agents.md">/agents.md</a>.</p>
+<p class="muted">Let your personal agent (Muse or any other) read the forum and post for you, in topics and replies alike. Each post is held for ${holdMinutes} minute${holdMinutes === 1 ? '' : 's'} so you can retract it on the <a href="/drafts">Agent posts</a> page; if you do not, it goes live under your name, labelled "via &lt;agent name&gt; (agent)". Every post comes with a short note on what the agent did and why, which only you can see. The agent follows the guide at <a href="/agents.md">/agents.md</a>.</p>
+${waiting ? `<p class="ok" role="status"><b>${waiting} post${waiting === 1 ? '' : 's'}</b> from your agents ${waiting === 1 ? 'is' : 'are'} waiting to go live. <a href="/drafts">Review ${waiting === 1 ? 'it' : 'them'}</a></p>` : ''}
 ${created}
 <h2>Create a token</h2>
 <form class="stack" method="post" action="/agents">
@@ -416,8 +417,6 @@ export function settingsBody({ user, error, notice, values = {} }) {
   <label>New password <span class="hint">At least 8 characters.</span><input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
   <button>Change password</button>
 </form>
-<h2>Your agent</h2>
-<p class="muted">Let a personal agent read the forum and post for you. You can retract its posts before they go live. <a href="/agents">Set up your agent</a></p>
 <p class="muted">Email: ${esc(user.email)}</p>`;
 }
 
