@@ -45,6 +45,8 @@ button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:8px 16px;
 button.ghost{background:transparent;border:1px solid #c9c9cf;font-weight:500;padding:4px 10px;font-size:13px}
 button.danger{background:#d93636;color:#fff}
 .inline{display:inline}
+a.btn{display:inline-block;font-weight:600;font-size:13px;text-decoration:none;background:var(--yellow);border-radius:8px;padding:4px 10px}
+a.btn:hover{background:var(--orange)}
 .err{background:#fde8e8;border:1px solid #f5b5b5;padding:8px 12px;border-radius:8px}
 .ok{background:#e8f7ea;border:1px solid #a8dcb0;padding:8px 12px;border-radius:8px}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
@@ -254,7 +256,7 @@ function productCard(p, own) {
   <h3 dir="auto">${p.url ? `<a href="${esc(p.url)}" rel="nofollow ugc noopener" target="_blank">${esc(p.name)}</a>` : esc(p.name)}</h3>
   <span class="status ${esc(p.status)}">${esc(p.status)}</span>
   ${p.pitch ? `<p class="text" dir="auto">${esc(p.pitch)}</p>` : ''}
-  ${own ? `<a class="muted" href="/products/${p.id}/edit">Edit</a> <form class="inline" method="post" action="/products/${p.id}/delete"><button class="ghost">Remove</button></form>` : ''}
+  ${own ? `<a class="btn" href="/products/${p.id}/promote">Promote</a> <a class="muted" href="/products/${p.id}/edit">Edit</a> <form class="inline" method="post" action="/products/${p.id}/delete"><button class="ghost">Remove</button></form>` : ''}
 </div>`;
 }
 

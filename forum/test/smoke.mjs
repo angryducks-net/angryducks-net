@@ -207,6 +207,15 @@ await step('product cards: create, reject javascript: link, show on profile, edi
   const own = await bob.get(`/u/${bobId}`);
   const pid = own.text.match(/\/products\/(\d+)\/edit/)[1];
   assert.equal((await admin.post(`/products/${pid}/edit`, { name: 'Hacked', status: 'live' })).status, 404);
+  assert.match(own.text, new RegExp(`href="/products/${pid}/promote">Promote`));
+  assert.doesNotMatch(r.text, /\/promote"/); // not owner
+  assert.equal((await admin.get(`/products/${pid}/promote`)).status, 404);
+  const promo = await bob.get(`/products/${pid}/promote`);
+  assert.equal(promo.status, 200);
+  assert.match(promo.text, /action="\/new"/);
+  assert.match(promo.text, /value="Launched: DuckLint — Lints vibe-coded apps"/);
+  assert.match(promo.text, /Try it: https:\/\/ducklint\.example\//);
+  assert.match(promo.text, /name="tags" required value="show, launch"/);
   await bob.post(`/products/${pid}/edit`, { name: 'DuckLint 2', pitch: '', url: '', status: 'building' });
   assert.match((await bob.get(`/u/${bobId}`)).text, /DuckLint 2/);
 });

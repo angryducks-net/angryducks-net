@@ -208,3 +208,44 @@ export function prepareUpload(raw, { max = BODY_MAX, reserve = LINK_RESERVE } = 
     codeRemoved: stripped.removed,
   };
 }
+
+// ---------- product promotion ----------
+
+const PROMO_COPY = {
+  en: {
+    title: { live: 'Launched: ', building: 'Building: ', stopped: 'Retrospective: ' },
+    status: { live: "It's live.", building: 'Still building. Early feedback welcome.', stopped: 'This project has stopped. Here is what I learned.' },
+    tryIt: 'Try it: ',
+    sections: [
+      ['What it does', '[Who is it for, and what problem does it solve?]'],
+      ['How I built it', '[Stack, AI tools, how long it took.]'],
+      ['Known issues', "[What doesn't work yet. Be honest.]"],
+      ['Feedback I want', '[What should people try, or tell you?]'],
+    ],
+  },
+  zh: {
+    title: { live: '上线了：', building: '在做：', stopped: '复盘：' },
+    status: { live: '已上线。', building: '还在开发中，欢迎早期反馈。', stopped: '这个项目已停止，分享一下经验教训。' },
+    tryIt: '试用：',
+    sections: [
+      ['它做什么', '[给谁用？解决什么问题？]'],
+      ['怎么做出来的', '[技术栈、用了哪些 AI 工具、花了多久。]'],
+      ['已知问题', '[哪些地方还不行？请如实写。]'],
+      ['想要的反馈', '[希望大家试什么、告诉你什么？]'],
+    ],
+  },
+};
+const PROMO_TAGS = { live: ['show', 'launch'], building: ['show', 'building'], stopped: ['show', 'retrospective'] };
+
+// Draft topic promoting a product card. The author reviews it and fills in the [bracketed] parts before posting.
+export function promoDraft(product) {
+  const copy = detectLang(product.name, product.pitch) === 'zh' ? PROMO_COPY.zh : PROMO_COPY.en;
+  const status = PRODUCT_STATUSES.includes(product.status) ? product.status : 'building';
+  let title = copy.title[status] + product.name;
+  const withPitch = product.pitch ? `${title} — ${product.pitch}` : title;
+  if (charLen(withPitch) <= 100) title = withPitch;
+  const intro = [`**${product.name}**${product.pitch ? ` — ${product.pitch}` : ''}`, copy.status[status]];
+  if (product.url) intro.push(copy.tryIt + product.url);
+  const body = [intro.join('\n'), ...copy.sections.map(([h, prompt]) => `### ${h}\n${prompt}`)].join('\n\n');
+  return { title, body, tags: PROMO_TAGS[status].join(', ') };
+}

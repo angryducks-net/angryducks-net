@@ -1,6 +1,6 @@
 import {
   BODY_MAX, charLen, detectLang, EMAIL_RE, esc, hasCodeBlock, hotScore, NAME_RE, parseTags, prepareUpload, PRODUCT_STATUSES,
-  validProductUrl,
+  promoDraft, validProductUrl,
 } from './util.js';
 import {
   hashPassword, LOCK_AFTER, LOCK_MS, randomCode, randomHex, readCookie, SESSION_MS, sessionCookie, sha256Hex, verifyPassword,
@@ -621,6 +621,16 @@ route('POST', '/products/(\\d+)/edit', async (ctx, id) => {
     .bind(v.values.name, v.values.pitch, v.values.url, v.values.status, p.id)
     .run();
   return redirect(`/u/${ctx.user.id}`);
+});
+
+// Opens the new-topic form filled with a promo post for the card; the author reviews it, then posts.
+route('GET', '/products/(\\d+)/promote', async (ctx, id) => {
+  const { p, res } = await ownProduct(ctx, id);
+  if (res) return res;
+  return newTopicForm(ctx, {
+    values: promoDraft(p),
+    notice: `Draft generated from your "${p.name}" card. Replace the [bracketed] parts, then post.`,
+  });
 });
 
 route('POST', '/products/(\\d+)/delete', async (ctx, id) => {

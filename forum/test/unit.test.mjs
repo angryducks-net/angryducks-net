@@ -149,3 +149,25 @@ test('excerpt: markdown syntax stripped, whitespace collapsed, long text cut', a
   assert.equal(excerpt('中'.repeat(250)), '中'.repeat(200) + '…');
   assert.equal(excerpt(''), '');
 });
+
+test('promo draft: language, status, link, and it passes topic validation', async () => {
+  const { promoDraft, parseTags, hasCodeBlock, charLen, BODY_MAX } = await import('../src/util.js');
+  const en = promoDraft({ name: 'DuckLint', pitch: 'Lints vibe-coded apps', url: 'https://ducklint.example/', status: 'live' });
+  assert.equal(en.title, 'Launched: DuckLint — Lints vibe-coded apps');
+  assert.match(en.body, /^\*\*DuckLint\*\* — Lints vibe-coded apps\nIt's live\.\nTry it: https:\/\/ducklint\.example\//);
+  assert.match(en.body, /### Known issues/);
+  assert.deepEqual(parseTags(en.tags).tags, ['show', 'launch']);
+
+  const zh = promoDraft({ name: '鸭子笔记', pitch: '给独立开发者的笔记工具', url: '', status: 'building' });
+  assert.equal(zh.title, '在做：鸭子笔记 — 给独立开发者的笔记工具');
+  assert.match(zh.body, /### 已知问题/);
+  assert.doesNotMatch(zh.body, /试用/);
+  assert.deepEqual(parseTags(zh.tags).tags, ['show', 'building']);
+
+  // A long pitch is dropped from the title to stay within 100 characters.
+  const long = promoDraft({ name: 'N'.repeat(60), pitch: 'p'.repeat(140), url: '', status: 'stopped' });
+  assert.equal(long.title, `Retrospective: ${'N'.repeat(60)}`);
+  for (const d of [en, zh, long]) {
+    assert.ok(charLen(d.title) <= 100 && charLen(d.body) <= BODY_MAX && !hasCodeBlock(d.body));
+  }
+});
