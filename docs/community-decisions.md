@@ -161,3 +161,12 @@ This is the running log of how the AngryDucks community and forum are designed, 
 - **Decision:** Under each topic title in the list, show the start of the body as plain text, with Markdown syntax removed. It is clipped to two lines with an ellipsis.
 - **Why:** The title, tags and meta line already take three lines. Two lines of excerpt are enough to tell what a topic is about while keeping several topics on one screen. We clip by lines, not characters, because Chinese and English characters differ in width.
 - **Status:** Active
+
+---
+
+## 2026-11-03 · Product promotion
+
+### D26. A product card can draft a promo topic for review
+- **Decision:** A member's own product cards (D8) have a Promote button. It opens the new-topic form filled with a draft made from the card: a title by status ("Launched:", "Building:", "Retrospective:"), the name, pitch and link, and four sections (what it does, how I built it, known issues, feedback I want) with [bracketed] prompts, plus the tags `show` and one by status. The draft is in Chinese or English, following the card's text. Nothing is posted until the author fills in the prompts and submits.
+- **Why:** Showing what you shipped should take one click to start. It is not posted automatically, for the same reason as D11, and because only the author can honestly write the known issues. The post goes through the normal flow, so the D12 limits still apply.
+- **Status:** Active
