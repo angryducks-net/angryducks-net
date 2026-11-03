@@ -6,7 +6,7 @@ import {
   hashPassword, LOCK_AFTER, LOCK_MS, randomCode, randomHex, readCookie, SESSION_MS, sessionCookie, sha256Hex, verifyPassword,
 } from './auth.js';
 import {
-  agentMessage, agentsGuide, AGENT_DAILY_LIMIT, CLAIM_LINK_SECONDS, DRAFTS_PER_MIN, HOLD_SECONDS, LABEL_MAX, MAX_PENDING_DRAFTS, MAX_TOKENS,
+  agentMessage, agentsGuide, AGENT_DAILY_LIMIT, CLAIM_LINK_SECONDS, DRAFTS_PER_MIN, HOLD_SECONDS, inviteMessage, LABEL_MAX, MAX_PENDING_DRAFTS, MAX_TOKENS,
   ownerMessage, SIGNUP_FAILS_PER_HOUR, SIGNUP_PER_IP_DAY, SUMMARY_MAX, TOKEN_PREFIX, UNCLAIMED_POST_LIMIT,
 } from './agents-doc.js';
 import * as V from './views.js';
@@ -21,6 +21,11 @@ const DAILY_LIMIT = 30; // posts per 24 hours per user
 // Worker vars GLOBAL_DRAFTS_PER_DAY / GLOBAL_SIGNUPS_PER_DAY. Set AGENTS_PAUSED=1 to refuse the whole agent API.
 const GLOBAL_DRAFTS_PER_DAY = 300;
 const GLOBAL_SIGNUPS_PER_DAY = 50;
+// Applications to join (D32). Override with Worker vars APPLY_PER_IP_HOUR / APPLY_MAX_PENDING.
+const APPLY_PER_IP_HOUR = 30; // an event's wifi shares one IP
+const APPLY_MAX_PENDING = 200; // stop taking new ones while this many wait for review
+const APPLY_NAME_MAX = 40;
+const APPLY_NOTE_MAX = 280;
 const UPLOAD_MAX_BYTES = 100 * 1024;
 const LIST_LIMIT = 50;
 const SCAN_LIMIT = 500; // newest topics considered for hot ranking
@@ -96,7 +101,10 @@ function redirect(location, extra = {}) {
 async function page(ctx, title, body, status = 200, headers = {}) {
   const unread = ctx.user ? await unreadTopics(ctx.db, ctx.user.id).then((r) => r.length) : 0;
   const drafts = ctx.user ? await pendingDraftCount(ctx.db, ctx.user.id) : 0;
-  return html(V.layout({ title, user: ctx.user, unread, drafts, body, homeUrl: ctx.env.HOME_ORIGIN || DEFAULT_HOME_ORIGIN }), status, headers);
+  const applications = ctx.user?.is_admin
+    ? (await ctx.db.prepare("SELECT COUNT(*) AS n FROM applications WHERE status = 'pending'").first()).n
+    : 0;
+  return html(V.layout({ title, user: ctx.user, unread, drafts, applications, body, homeUrl: ctx.env.HOME_ORIGIN || DEFAULT_HOME_ORIGIN }), status, headers);
 }
 
 function message(ctx, title, text, status) {
@@ -473,7 +481,10 @@ route('POST', '/login', async (ctx) => {
   return startSession(ctx, u.id);
 }, { open: true });
 
-route('GET', '/register', (ctx) => (ctx.user ? redirect('/') : page(ctx, 'Join', V.registerBody({}))), { open: true });
+// ?invite= prefills the code: an approved application's page links here (D32).
+route('GET', '/register', (ctx) =>
+  ctx.user ? redirect('/') : page(ctx, 'Join', V.registerBody({ values: { invite: (ctx.url.searchParams.get('invite') || '').slice(0, 64) } })),
+  { open: true });
 
 route('POST', '/register', async (ctx) => {
   const get = await form(ctx.request);
@@ -1361,9 +1372,146 @@ route('POST', '/claim/([0-9a-f]{48})', async (ctx, code) => {
   return startSession(ctx, link.user_id, '/agents');
 }, { open: true });
 
+// ---------- applications (D32) ----------
+// Anyone can ask to join, from a QR code at an event or the button on the home page. An admin approves; that issues a
+// normal one-time invite code, shown on the applicant's status page. Registration itself (web or agent) is unchanged.
+
+function homeOrigin(env) {
+  return `https://${(env.HOME_HOSTS || DEFAULT_HOME_HOSTS).split(',')[0].trim()}`;
+}
+
+// The status page URL is the applicant's only key to their invite code, so it is a long random secret; we store its hash.
+// A cookie remembers it, so an applicant who closed the tab finds their page again from /apply.
+const APPLY_COOKIE = 'apply';
+const APPLY_TOKEN_RE = /^[0-9a-f]{48}$/;
+const APPLY_COOKIE_DAYS = 30;
+
+function applyCookie(token, secure) {
+  return `${APPLY_COOKIE}=${token}; Path=/apply; HttpOnly; SameSite=Lax; Max-Age=${APPLY_COOKIE_DAYS * 86_400}${secure ? '; Secure' : ''}`;
+}
+
+// ?src= on the link says where the applicant came from (the event a QR code was shown at). Short and plain, or nothing.
+function applySource(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_-]{0,31}$/.test(s) ? s : '';
+}
+
+function applyPage(ctx, opts = {}, status = 200) {
+  return page(ctx, 'Apply to join', V.applyBody(opts), status, { 'Cache-Control': 'no-store' });
+}
+
+route('GET', '/apply', async (ctx) => {
+  const saved = readCookie(ctx.request, APPLY_COOKIE);
+  if (saved && APPLY_TOKEN_RE.test(saved) && ctx.url.searchParams.get('new') !== '1') {
+    const mine = await ctx.db.prepare('SELECT 1 FROM applications WHERE token_hash = ?').bind(await sha256Hex(saved)).first();
+    if (mine) return redirect(`/apply/${saved}`);
+  }
+  return applyPage(ctx, { values: { source: applySource(ctx.url.searchParams.get('src')) } });
+}, { open: true });
+
+route('POST', '/apply', async (ctx) => {
+  const get = await form(ctx.request);
+  const values = { name: get('name').replace(/\s+/g, ' ').trim(), note: get('note').trim(), source: applySource(get('source')) };
+  const fail = (error, status = 400) => applyPage(ctx, { error, values }, status);
+  if (!values.name || charLen(values.name) > APPLY_NAME_MAX) return fail(`Tell us what to call you, in at most ${APPLY_NAME_MAX} characters.`);
+  if (charLen(values.note) > APPLY_NOTE_MAX) return fail(`The note can be at most ${APPLY_NOTE_MAX} characters.`);
+
+  const db = ctx.db;
+  const now = Date.now();
+  // A venue's wifi puts everyone behind one address, so the per-IP limit is generous; the pending cap bounds the total.
+  const ipHash = (await sha256Hex(`apply:${ctx.request.headers.get('CF-Connecting-IP') || 'unknown'}`)).slice(0, 32);
+  const counts = await db
+    .prepare(
+      `SELECT (SELECT COUNT(*) FROM applications WHERE ip_hash = ? AND created_at > ?) AS recent,
+              (SELECT COUNT(*) FROM applications WHERE status = 'pending') AS pending`,
+    )
+    .bind(ipHash, now - 3_600_000)
+    .first();
+  if (counts.recent >= limitFrom(ctx.env, 'APPLY_PER_IP_HOUR', APPLY_PER_IP_HOUR)) {
+    return fail('Too many applications from this network in the last hour. Please try again later.', 429);
+  }
+  if (counts.pending >= limitFrom(ctx.env, 'APPLY_MAX_PENDING', APPLY_MAX_PENDING)) {
+    return fail('We have more applications waiting than we can review right now. Please try again later.', 503);
+  }
+  const token = randomHex(24);
+  await db
+    .prepare('INSERT INTO applications (token_hash, name, note, source, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(await sha256Hex(token), values.name, values.note, values.source, ipHash, now)
+    .run();
+  return redirect(`/apply/${token}`, { 'Set-Cookie': applyCookie(token, ctx.secure) });
+}, { open: true });
+
+// The applicant's status page: waiting, approved (with the invite code and a message for their agent), or declined.
+route('GET', '/apply/([0-9a-f]{48})', async (ctx, token) => {
+  const app = await ctx.db
+    .prepare(
+      `SELECT a.id, a.name, a.status, a.invite_code, a.created_at, i.used_by FROM applications a
+       LEFT JOIN invites i ON i.code = a.invite_code WHERE a.token_hash = ?`,
+    )
+    .bind(await sha256Hex(token))
+    .first();
+  if (!app) return message(ctx, 'Not found', 'This application does not exist. The link may be incomplete.', 404);
+  const nonce = randomHex(16);
+  const headers = { 'Cache-Control': 'no-store', 'Set-Cookie': applyCookie(token, ctx.secure) };
+  const approved = app.status === 'approved' && app.invite_code;
+  if (approved) headers['Content-Security-Policy'] = `${SECURITY_HEADERS['Content-Security-Policy']}; script-src 'nonce-${nonce}'`;
+  if (app.status === 'pending') headers.Refresh = '10';
+  const forAgent = approved ? inviteMessage(homeOrigin(ctx.env), app.invite_code) : null;
+  return page(ctx, 'Your application', V.applyStatusBody({ app, forAgent, nonce, used: approved && app.used_by !== null }), 200, headers);
+}, { open: true });
+
+// Approves one pending application: a new invite code, linked to it. One transaction, and only while still pending,
+// so a double click or two admins at once cannot issue two codes. Returns the code, or null if it was already decided.
+async function approveApplication(db, appId, adminId, now) {
+  const code = `inv_${randomCode(10)}`;
+  const [, updated] = await db.batch([
+    db
+      .prepare(`INSERT INTO invites (code, created_by, created_at) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM applications WHERE id = ? AND status = 'pending')`)
+      .bind(code, adminId, now, appId),
+    db.prepare(`UPDATE applications SET status = 'approved', invite_code = ?, decided_at = ? WHERE id = ? AND status = 'pending'`).bind(code, now, appId),
+  ]);
+  return updated.meta.changes ? code : null;
+}
+
+route('POST', '/admin/applications/(\\d+)/(approve|reject)', async (ctx, id, action) => {
+  const app = await ctx.db.prepare('SELECT id, name, status FROM applications WHERE id = ?').bind(Number(id)).first();
+  if (!app) return message(ctx, 'Not found', 'This application does not exist.', 404);
+  const now = Date.now();
+  if (action === 'approve') {
+    const code = await approveApplication(ctx.db, app.id, ctx.user.id, now);
+    if (!code) return renderAdmin(ctx, `${esc(app.name)}'s application was already ${esc(app.status)}.`);
+    return renderAdmin(ctx, `Approved ${esc(app.name)}. Their page now shows invite code <code>${esc(code)}</code>.`);
+  }
+  const res = await ctx.db
+    .prepare(`UPDATE applications SET status = 'rejected', decided_at = ? WHERE id = ? AND status = 'pending'`)
+    .bind(now, app.id)
+    .run();
+  return renderAdmin(ctx, res.meta.changes ? `Declined ${esc(app.name)}.` : `${esc(app.name)}'s application was already ${esc(app.status)}.`);
+}, { admin: true });
+
+// For an event: approve everything waiting in one click. Only the ids the admin saw are approved, not later arrivals.
+route('POST', '/admin/applications/approve-all', async (ctx) => {
+  const get = await form(ctx.request);
+  const ids = get('ids').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0).slice(0, APPLY_MAX_PENDING);
+  const now = Date.now();
+  let n = 0;
+  for (const appId of ids) if (await approveApplication(ctx.db, appId, ctx.user.id, now)) n++;
+  return renderAdmin(ctx, `Approved ${n} application${n === 1 ? '' : 's'}. Each applicant's page now shows their invite code.`);
+}, { admin: true });
+
 // ---------- admin ----------
 
 async function renderAdmin(ctx, notice) {
+  const [{ results: pending }, { results: decided }] = await Promise.all([
+    ctx.db.prepare(`SELECT id, name, note, source, created_at FROM applications WHERE status = 'pending' ORDER BY created_at, id LIMIT ${APPLY_MAX_PENDING}`).all(),
+    ctx.db
+      .prepare(
+        `SELECT a.id, a.name, a.source, a.status, a.invite_code, a.decided_at, i.used_by, u.name AS used_name FROM applications a
+         LEFT JOIN invites i ON i.code = a.invite_code LEFT JOIN users u ON u.id = i.used_by
+         WHERE a.status != 'pending' ORDER BY a.decided_at DESC, a.id DESC LIMIT 30`,
+      )
+      .all(),
+  ]);
   const [{ results: invites }, { results: users }] = await Promise.all([
     ctx.db
       .prepare('SELECT i.*, u.name AS used_name FROM invites i LEFT JOIN users u ON u.id = i.used_by ORDER BY (i.used_by IS NULL) DESC, i.created_at DESC LIMIT 100')
@@ -1372,7 +1520,7 @@ async function renderAdmin(ctx, notice) {
   ]);
   const active = await flaggedActivity(ctx.env, Date.now());
   const alerts = { on: !!(ctx.env.EMAIL && ctx.env.ALERT_TO), ...alertThresholds(ctx.env) };
-  return page(ctx, 'Admin', V.adminBody({ invites, users, active, alerts, notice, me: ctx.user }));
+  return page(ctx, 'Admin', V.adminBody({ invites, users, active, alerts, notice, me: ctx.user, applications: { pending, decided } }));
 }
 
 // ---------- monitoring ----------
@@ -1429,8 +1577,7 @@ route('POST', '/admin/invites', async (ctx) => {
   // The prefix says what the string is: to an agent, an invite code, a token and a password all look like random characters.
   const code = `inv_${randomCode(10)}`;
   await ctx.db.prepare('INSERT INTO invites (code, created_by, created_at) VALUES (?, ?, ?)').bind(code, ctx.user.id, Date.now()).run();
-  const home = `https://${(ctx.env.HOME_HOSTS || DEFAULT_HOME_HOSTS).split(',')[0].trim()}`;
-  const forAgent = `Join the AngryDucks forum for me.\nSite: ${home}\nInvite code (single-use, not a password): ${code}\nRead ${home}/agents.md first; it explains how to register.`;
+  const forAgent = inviteMessage(homeOrigin(ctx.env), code);
   return renderAdmin(ctx, `New invite code: <code>${esc(code)}</code><br>To join through an agent, send the agent this message:<pre class="msg">${esc(forAgent)}</pre>`);
 }, { admin: true });
 

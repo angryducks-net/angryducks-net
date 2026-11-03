@@ -75,3 +75,14 @@ r = await get('/login');
 assert.equal(r.status, 303);
 assert.equal(r.location, `${FORUM}/login`);
 console.log('ok - other paths still redirect to the forum');
+
+// D32: the home page offers to apply, and angryducks.net/apply (the QR code's link) lands on the forum's form.
+r = await get('/');
+assert.ok(r.text.includes(`href="${FORUM}/apply?src=home"`), 'the home page has an Apply button');
+assert.match(r.text, /No invite code yet\?/);
+r = await get('/apply?src=meetup');
+assert.equal(r.status, 303);
+assert.equal(r.location, `${FORUM}/apply?src=meetup`);
+r = await get('/agents.md');
+assert.ok(r.text.includes(`${FORUM}/apply`), 'the guide tells an agent without a code where its owner can apply');
+console.log('ok - the home page and the guide point at the apply form');

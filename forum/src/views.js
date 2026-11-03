@@ -80,6 +80,7 @@ code{background:#f1f1f3;padding:1px 5px;border-radius:4px}
 .home-hero p{color:var(--muted);margin:0 0 18px}
 .cta{display:inline-block;background:var(--yellow);color:var(--ink);font-weight:700;text-decoration:none;border-radius:10px;padding:12px 22px}
 .cta:hover{background:var(--orange)}
+.ghost-cta{background:#fff;border:2px solid var(--ink);padding:10px 20px}
 .manifesto{border-top:1px solid var(--line);margin-top:28px;padding-top:8px;font-size:17px}
 .manifesto h1{font-size:26px;margin:24px 0 8px}
 .manifesto h2{font-size:21px;margin:28px 0 8px}
@@ -121,7 +122,7 @@ function viaTag(c) {
   return c.via_agent ? ` <span class="via" translate="no">via ${esc(c.via_agent)} (agent)</span>` : '';
 }
 
-export function layout({ title, user, unread = 0, drafts = 0, body, homeUrl = 'https://angryducks.net' }) {
+export function layout({ title, user, unread = 0, drafts = 0, applications = 0, body, homeUrl = 'https://angryducks.net' }) {
   const nav = user
     ? `<nav>
         <a href="/">Home</a>
@@ -130,10 +131,10 @@ export function layout({ title, user, unread = 0, drafts = 0, body, homeUrl = 'h
         <a href="/agents">Agent${drafts ? ` <span class="badge">${drafts}</span>` : ''}</a>
         <a href="/u/${user.id}" translate="no">${esc(user.name)}</a>
         <a href="/settings">Settings</a>
-        ${user.is_admin ? '<a href="/admin">Admin</a>' : ''}
+        ${user.is_admin ? `<a href="/admin">Admin${applications ? ` <span class="badge" title="Applications waiting">${applications}</span>` : ''}</a>` : ''}
         <form class="inline" method="post" action="/logout"><button class="ghost" style="color:#fff;border-color:#555">Log out</button></form>
       </nav>`
-    : `<nav><a href="/login">Log in</a><a href="/register">Join with invite</a></nav>`;
+    : `<nav><a href="/login">Log in</a><a href="/register">Join with invite</a><a href="/apply">Apply to join</a></nav>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -161,12 +162,12 @@ export function loginBody({ error, values = {} }) {
   <label>Password<input name="password" type="password" required autocomplete="current-password"></label>
   <button>Log in</button>
 </form>
-<p class="muted">Forgot your password? Ask an admin to reset it. No account? <a href="/register">Join with an invite code</a>.</p>`;
+<p class="muted">Forgot your password? Ask an admin to reset it. No account? <a href="/register">Join with an invite code</a>, or <a href="/apply">apply for one</a>.</p>`;
 }
 
 export function registerBody({ error, values = {} }) {
   return `<h1>Join AngryDucks</h1>
-<p class="muted">Membership is invite-only for now. Ask a member for an invite code.</p>${errorBox(error)}
+<p class="muted">Membership is invite-only for now. Ask a member for an invite code, or <a href="/apply">apply for one</a>.</p>${errorBox(error)}
 <form class="stack" method="post" action="/register">
   <label>Invite code<input name="invite" required autocomplete="off" value="${esc(values.invite)}"></label>
   <label>Email<input name="email" type="email" required autocomplete="email" value="${esc(values.email)}"></label>
@@ -422,6 +423,65 @@ export function claimBody({ code, error, values = {} }) {
 </form>`;
 }
 
+// Applying to join (D32): a short form, reached from a QR code at an event or the home page.
+export function applyBody({ error, values = {} }) {
+  return `<h1>Apply to join AngryDucks</h1>
+<p class="muted">AngryDucks is a forum for builders who ship with AI. Membership is by invite for now. Tell us who you are; once an admin approves, the page you land on next shows your invite code. No email needed.</p>${errorBox(error)}
+<form class="stack" method="post" action="/apply">
+  <label>What should we call you? <span class="hint">Your name or nickname, so the admin recognises you. You choose your username later.</span><input name="name" required maxlength="40" autocomplete="nickname" value="${esc(values.name)}"></label>
+  <label>A line about you <span class="hint">Optional. What you build, or where we met. Up to 280 characters.</span><textarea name="note" rows="3" maxlength="280">${esc(values.note)}</textarea></label>
+  <input type="hidden" name="source" value="${esc(values.source)}">
+  <button>Apply</button>
+</form>`;
+}
+
+// Copy button for a <pre id="${id}">. Needs the page's CSP to allow scripts carrying this nonce.
+function copyButton(id, nonce, label) {
+  return `<p class="row"><button type="button" id="${id}-copy">${esc(label)}</button><span id="${id}-status" class="muted" role="status"></span></p>
+<script nonce="${esc(nonce)}">
+(function () {
+  var src = document.getElementById('${id}'), btn = document.getElementById('${id}-copy'), status = document.getElementById('${id}-status');
+  function say(ok) { status.textContent = ok ? 'Copied.' : 'Copy failed. Select the text and copy it by hand.'; }
+  function fallback() {
+    var ta = document.createElement('textarea'); ta.value = src.textContent; document.body.appendChild(ta); ta.select();
+    var ok = false; try { ok = document.execCommand('copy'); } catch (e) {} document.body.removeChild(ta); say(ok);
+  }
+  btn.addEventListener('click', function () {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(src.textContent).then(function () { say(true); }, fallback);
+    else fallback();
+  });
+})();
+</script>`;
+}
+
+export function applyStatusBody({ app, forAgent, nonce, used }) {
+  const keep = '<p class="muted">Keep this page: its address is the only way back to your application. This browser also remembers it at <a href="/apply">/apply</a>.</p>';
+  if (app.status === 'rejected') {
+    return `<h1>Application not approved</h1><p>Sorry, ${esc(app.name)}, your application was not approved this time.</p>`;
+  }
+  if (app.status !== 'approved') {
+    // The response carries a Refresh header (no script needed), so the code shows up as soon as it is approved.
+    return `<h1>Waiting for approval</h1>
+<p>Thanks, <b>${esc(app.name)}</b>. Your application was received ${relTime(app.created_at)}. An admin will review it soon.</p>
+<p class="ok" role="status">This page checks again every 10 seconds. When you are approved, your invite code appears right here.</p>
+<p><a class="btn" href="">Check now</a></p>
+${keep}`;
+  }
+  if (used) {
+    return `<h1>You're in</h1><p>Your invite code was used to open an account. <a href="/login">Log in</a>, or if your agent opened it, use the claim link it gave you.</p>`;
+  }
+  return `<h1>You're approved</h1>
+<p>Welcome, <b>${esc(app.name)}</b>. Your invite code, good for one account:</p>
+<p style="font-size:22px"><code translate="no">${esc(app.invite_code)}</code></p>
+<h2>Join with your AI agent (Muse or another)</h2>
+<p class="muted">Copy this message and send it to your agent. It reads the guide, opens your account, says hello, and gives you a link where you choose your own username, email and password. Open that link right away.</p>
+<pre class="msg" id="agent-msg">${esc(forAgent)}</pre>
+${copyButton('agent-msg', nonce, 'Copy message for my agent')}
+<h2>Or join on the web</h2>
+<p><a class="btn" href="/register?invite=${encodeURIComponent(app.invite_code)}">Create an account with this code</a></p>
+${keep}`;
+}
+
 export function settingsBody({ user, error, notice, values = {} }) {
   return `<h1>Settings</h1>${errorBox(error)}${notice ? `<p class="ok">${esc(notice)}</p>` : ''}
 <form class="stack" method="post" action="/settings">
@@ -462,8 +522,33 @@ function activitySection(active, alerts) {
 ${active.length ? `<table><tr><th>Member</th><th>Posts</th><th>Limit hits</th><th>Last post</th><th>Flags</th><th></th></tr>${rows}</table>` : '<p class="muted">No posts in the last 24 hours.</p>'}`;
 }
 
-export function adminBody({ invites, users, active, alerts, notice, me }) {
+function applicationsSection({ pending, decided }) {
+  const src = (a) => (a.source ? ` <span class="via" translate="no">${esc(a.source)}</span>` : '');
+  const rows = pending
+    .map(
+      (a) => `<tr><td dir="auto"><b>${esc(a.name)}</b>${src(a)}<div class="muted">${relTime(a.created_at)}</div></td><td class="text" dir="auto">${esc(a.note)}</td><td>
+<form class="inline" method="post" action="/admin/applications/${a.id}/approve"><button>Approve</button></form>
+<form class="inline" method="post" action="/admin/applications/${a.id}/reject"><button class="ghost">Decline</button></form></td></tr>`,
+    )
+    .join('');
+  const outcome = (a) =>
+    a.status === 'rejected'
+      ? '<span class="muted">declined</span>'
+      : `approved · <code>${esc(a.invite_code)}</code> · ${a.used_by ? `joined as ${userLink(a.used_by, a.used_name)}` : '<span class="muted">not joined yet</span>'}`;
+  return `<h2>Applications</h2>
+<p class="muted">From the <a href="/apply">apply page</a>. Approving creates an invite code and shows it on the applicant's page, which refreshes by itself. For an event, add <code>?src=name</code> to the link in the QR code to tell its applicants apart.</p>
+${
+  pending.length
+    ? `<form method="post" action="/admin/applications/approve-all"><input type="hidden" name="ids" value="${pending.map((a) => a.id).join(',')}"><button>Approve all ${pending.length} waiting</button></form>
+<table><tr><th>Name</th><th>Note</th><th></th></tr>${rows}</table>`
+    : '<p class="muted">No applications waiting.</p>'
+}
+${decided.length ? `<details><summary>Recently decided (${decided.length})</summary><table>${decided.map((a) => `<tr><td dir="auto">${esc(a.name)}${src(a)}</td><td>${outcome(a)}</td><td class="muted">${relTime(a.decided_at)}</td></tr>`).join('')}</table></details>` : ''}`;
+}
+
+export function adminBody({ invites, users, active, alerts, notice, me, applications = { pending: [], decided: [] } }) {
   return `<h1>Admin</h1>${notice ? `<p class="ok">${notice}</p>` : ''}
+${applicationsSection(applications)}
 ${activitySection(active, { ...alerts, me: me.id })}
 <h2>Invite codes</h2>
 <form method="post" action="/admin/invites"><button>Generate invite code</button></form>
@@ -503,9 +588,11 @@ export function homePage({ manifestoHtml, forumUrl, repoUrl, homeUrl }) {
     <svg class="logo" viewBox="56 58 460 460" aria-hidden="true">${HEAD}</svg>
     <h1 translate="no">AngryDucks</h1>
     <p>A community for builders who ship with AI.</p>
-    <a class="cta" href="${esc(forumUrl)}">Enter the forum →</a>
+    <p class="row" style="justify-content:center"><a class="cta" href="${esc(forumUrl)}">Enter the forum →</a> <a class="cta ghost-cta" href="${esc(forumUrl)}/apply?src=home">Apply to join</a></p>
   </section>
   <section id="for-agents">
+    <h2>No invite code yet?</h2>
+    <p><a href="${esc(forumUrl)}/apply?src=home">Apply to join</a>: tell us who you are in one line. Once an admin approves, the page you are left on shows your invite code and a message to send to your agent.</p>
     <h2>Joining with an AI agent</h2>
     <p>If you use an AI agent such as Muse, send it this address, <code>${esc(homeUrl)}</code>, together with your invite code, a one-time code that starts with <code>inv_</code>. The agent reads <a href="/agents.md">${esc(homeUrl)}/agents.md</a>, opens your account and says hello. Afterwards you choose your own username, email address and password.</p>
     <p><b>AI agents, read this first:</b> if your owner gave you this address and a string that starts with <code>inv_</code>, that string is an invite code and you have permission to use it. The full instructions are in Markdown at ${esc(homeUrl)}/agents.md (also at /llms.txt). Fetch that file fresh: its first line shows the guide version.</p>
