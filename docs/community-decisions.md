@@ -107,3 +107,22 @@ This is the running log of how the AngryDucks community and forum are designed, 
 - **Decision:** Topics and replies share one limit of 6000 characters (was 1000 in D9), still counted simply as characters in any language. Anything longer is published elsewhere, such as Substack, a personal blog, or a GitHub repository, and the post carries a summary plus the link. The posting rules, the over-limit error, and the `.md` upload notice all suggest this.
 - **Why:** 1000 characters was too tight for real content. The AngryDucks manifesto (about 2800 characters) was cut to its first two sections on upload. 6000 fits a full essay of that size, while very long writing still belongs on a platform built for it.
 - **Status:** Active
+
+---
+
+## 2026-11-03 · Bots and spam
+
+### D20. Invite-only is the bot defense for now
+- **Decision:** While the forum is invite-only, we rely on invite codes plus the per-member limits in D12. We add no further anti-bot measures yet.
+- **Why:** A bot cannot join without an invite code. Each code works once, so a leaked code gives at most one account, and D12 caps that account at 30 posts a day. With a small seed group, more machinery costs more than it saves.
+- **Status:** Active
+
+### D21. Opening registration to the public requires an anti-bot review first
+- **Decision:** Before anyone can join without an invite, we review and decide on each of these:
+  1. **Human check** (Cloudflare Turnstile) on the join and login pages. This adds a third-party script, so keep it to those two pages.
+  2. **Email verification**, which needs an email-sending service.
+  3. **Per-IP limits** on login and join attempts. Today's lockout works per account only.
+  4. **Link limits for new accounts.** Spam is mostly links.
+  5. **Banning hides the member's posts.** Today a ban only blocks login; posts stay up and must be deleted one by one.
+  6. **A report button**, and later AI-assisted spam flagging alongside AI tagging.
+- **Status:** Deferred until we plan public registration. Revisit together with D3 and D4.
