@@ -152,3 +152,12 @@ This is the running log of how the AngryDucks community and forum are designed, 
   4. Every 15 minutes a cron job flags members with 15+ posts or 3+ limit hits in 24 hours. It emails the admin through Cloudflare Email Sending and names each member at most once a day. The thresholds can be changed with the Worker vars `ALERT_POSTS_24H` / `ALERT_HITS_24H`.
 - **Why:** While the forum is invite-only (D20), we do not limit posting further. We ban bad actors after the fact. That only works if a ban removes the damage at once and we find out quickly. Keeping the data lets us investigate and undo mistakes.
 - **Status:** Active
+
+---
+
+## 2026-11-03 · Topic list
+
+### D25. Each topic in the list shows a two-line excerpt
+- **Decision:** Under each topic title in the list, show the start of the body as plain text, with Markdown syntax removed. It is clipped to two lines with an ellipsis.
+- **Why:** The title, tags and meta line already take three lines. Two lines of excerpt are enough to tell what a topic is about while keeping several topics on one screen. We clip by lines, not characters, because Chinese and English characters differ in width.
+- **Status:** Active
