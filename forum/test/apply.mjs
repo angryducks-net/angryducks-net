@@ -1,9 +1,14 @@
 // Applying to join (D32). Needs a FRESH database and a server with a low per-IP limit:
 //   npx wrangler dev --persist-to /tmp/ad-apply --var APPLY_PER_IP_HOUR:5
+// plus a second server on the same database that plays angryducks.net, for the home page:
+//   npx wrangler dev --persist-to /tmp/ad-apply --port 8790 --local-upstream angryducks.net
+// and run with HOME_BASE=http://localhost:8790.
 import assert from 'node:assert/strict';
 
+let r;
 const BASE = process.env.BASE || 'http://localhost:8787';
 const BOOTSTRAP = process.env.BOOTSTRAP_CODE || 'local-bootstrap';
+const HOME = process.env.HOME_BASE || 'http://localhost:8790';
 
 // A tiny cookie jar per "browser", so the admin and each applicant keep their own cookies.
 function browser() {
@@ -18,8 +23,8 @@ function browser() {
   };
   return {
     jar,
-    async get(path) {
-      const res = await fetch(BASE + path, { redirect: 'manual', headers: { Cookie: cookieHeader() } });
+    async get(path, base = BASE) {
+      const res = await fetch(base + path, { redirect: 'manual', headers: { Cookie: cookieHeader() } });
       keep(res);
       return { status: res.status, location: res.headers.get('location'), headers: res.headers, text: await res.text() };
     },
@@ -45,11 +50,39 @@ for (let i = 0; i < 60; i++) {
 }
 
 const admin = browser();
-assert.equal((await admin.post('/register', { invite: BOOTSTRAP, email: 'a@example.com', name: 'Admin', password: 'password123' })).status, 303);
+r = await admin.post('/register', { invite: BOOTSTRAP, email: 'a@example.com', name: 'Admin', password: 'password123' });
+assert.equal(r.status, 303);
+assert.ok(r.headers.getSetCookie().some((c) => c.startsWith('ad_member=1;')), 'logging in marks the browser as a member');
+
+// Closed by default (D33): the form says to email, and nothing can be submitted. The home page shows the address.
+const visitor = browser();
+r = await visitor.get('/apply?src=meetup');
+assert.equal(r.status, 200);
+assert.match(r.text, /Applications are closed right now/);
+assert.match(r.text, /mailto:angryducks\.net@gmail\.com/);
+assert.equal((await visitor.post('/apply', { name: 'Early' })).status, 403);
+r = await visitor.get('/', HOME);
+assert.match(r.text, /Email <a href="mailto:angryducks\.net@gmail\.com/);
+assert.doesNotMatch(r.text, /Apply to join/);
+assert.match(r.headers.get('vary'), /Cookie/);
+console.log('ok - applications are closed by default; the home page and /apply show the email address');
+
+// The admin opens them for some hours: the home page shows the button, but not to a logged-in member.
+assert.equal((await admin.post('/admin/apply-window', { hours: '99' })).status, 400);
+r = await admin.post('/admin/apply-window', { hours: '3' });
+assert.match(r.text, /Applications are open for the next 3 hours/);
+assert.match(r.text, /Closes by itself in 3 hours/);
+r = await visitor.get('/', HOME);
+assert.match(r.text, /class="cta ghost-cta" href="[^"]+\/apply\?src=home">Apply to join/);
+assert.doesNotMatch(r.text, /mailto:/);
+r = await admin.get('/', HOME);
+assert.doesNotMatch(r.text, /Apply to join|mailto:|No invite code yet/, 'a member sees nothing about joining');
+assert.match((await admin.get('/apply')).text, /Already a member/);
+console.log('ok - an admin opens applications for a set time; members do not see the apply button');
 
 // The form is open to everyone and carries ?src= through.
 const alice = browser();
-let r = await alice.get('/apply?src=Meetup-1108');
+r = await alice.get('/apply?src=Meetup-1108');
 assert.equal(r.status, 200);
 assert.match(r.text, /Apply to join AngryDucks/);
 assert.match(r.text, /name="source" value="meetup-1108"/, 'the source is kept, lower-cased');
@@ -152,3 +185,13 @@ r = await browser().post('/apply', { name: 'Frank' });
 assert.equal(r.status, 429);
 assert.match(r.text, /Too many applications/);
 console.log('ok - applications are limited per network address');
+
+// Closing keeps existing pages working; logging out drops the member marker.
+r = await admin.post('/admin/apply-window', { hours: '0' });
+assert.match(r.text, /Applications are closed/);
+assert.match((await alice.get(aliceUrl)).text, /You're in/, 'an applicant page still works after closing');
+assert.equal((await erin.get('/apply')).location, erinUrl, 'and /apply still leads an applicant back to it');
+assert.match((await visitor.get('/', HOME)).text, /mailto:angryducks\.net@gmail\.com/);
+r = await admin.post('/logout', {});
+assert.ok(r.headers.getSetCookie().some((c) => c.startsWith('ad_member=;') && /Max-Age=0/.test(c)));
+console.log('ok - closing keeps applicant pages; logout clears the member marker');

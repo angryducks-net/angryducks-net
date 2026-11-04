@@ -76,13 +76,16 @@ assert.equal(r.status, 303);
 assert.equal(r.location, `${FORUM}/login`);
 console.log('ok - other paths still redirect to the forum');
 
-// D32: the home page offers to apply, and angryducks.net/apply (the QR code's link) lands on the forum's form.
+// D32, D33: while applications are closed (the default) the home page gives the address to email; angryducks.net/apply
+// (the QR code's link) lands on the forum's form. The open state is tested in test/apply.mjs.
 r = await get('/');
-assert.ok(r.text.includes(`href="${FORUM}/apply?src=home"`), 'the home page has an Apply button');
 assert.match(r.text, /No invite code yet\?/);
+assert.match(r.text, /href="mailto:angryducks\.net@gmail\.com\?subject=/);
+assert.doesNotMatch(r.text, /Apply to join/);
 r = await get('/apply?src=meetup');
 assert.equal(r.status, 303);
 assert.equal(r.location, `${FORUM}/apply?src=meetup`);
 r = await get('/agents.md');
-assert.ok(r.text.includes(`${FORUM}/apply`), 'the guide tells an agent without a code where its owner can apply');
-console.log('ok - the home page and the guide point at the apply form');
+assert.ok(r.text.includes('angryducks.net@gmail.com'), 'the guide tells an agent without a code where its owner can ask');
+assert.ok(r.text.includes(`${FORUM}/apply`));
+console.log('ok - the home page and the guide say how to ask for an invite');

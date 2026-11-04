@@ -435,6 +435,14 @@ export function applyBody({ error, values = {} }) {
 </form>`;
 }
 
+// /apply while applications are closed (D33): the address to email instead.
+export function applyClosedBody({ contactEmail }) {
+  const mailto = `mailto:${contactEmail}?subject=${encodeURIComponent('AngryDucks invite request')}`;
+  return `<h1>Applications are closed right now</h1>
+<p>We open applications at events. To ask for an invite code any other time, email <a href="${esc(mailto)}">${esc(contactEmail)}</a> with a line about who you are and what you build.</p>
+<p class="muted">Already applied? Open this page again in the browser you applied with, and it takes you to your application.</p>`;
+}
+
 // Copy button for a <pre id="${id}">. Needs the page's CSP to allow scripts carrying this nonce.
 function copyButton(id, nonce, label) {
   return `<p class="row"><button type="button" id="${id}-copy">${esc(label)}</button><span id="${id}-status" class="muted" role="status"></span></p>
@@ -522,7 +530,17 @@ function activitySection(active, alerts) {
 ${active.length ? `<table><tr><th>Member</th><th>Posts</th><th>Limit hits</th><th>Last post</th><th>Flags</th><th></th></tr>${rows}</table>` : '<p class="muted">No posts in the last 24 hours.</p>'}`;
 }
 
-function applicationsSection({ pending, decided }) {
+function applyWindow({ openUntil, now, maxHours }) {
+  const open = openUntil > now;
+  const left = Math.ceil((openUntil - now) / 60_000);
+  const status = open
+    ? `<p class="ok" role="status"><b>Open.</b> Closes by itself in ${left >= 120 ? `${Math.round(left / 60)} hours` : `${left} minutes`}. The home page shows the Apply button.</p>`
+    : '<p class="muted"><b>Closed.</b> The home page and /apply show the email address instead. Applications already made, and their pages, still work.</p>';
+  const openFor = (h) => `<form class="inline" method="post" action="/admin/apply-window"><input type="hidden" name="hours" value="${h}"><button${open ? ' class="ghost"' : ''}>Open for ${h} hours</button></form>`;
+  return `${status}<p class="row">${[3, 8, maxHours].map(openFor).join(' ')}${open ? ' <form class="inline" method="post" action="/admin/apply-window"><input type="hidden" name="hours" value="0"><button class="danger">Close now</button></form>' : ''}</p>`;
+}
+
+function applicationsSection({ pending, decided, openUntil = 0, now = Date.now(), maxHours = 24 }) {
   const src = (a) => (a.source ? ` <span class="via" translate="no">${esc(a.source)}</span>` : '');
   const rows = pending
     .map(
@@ -536,6 +554,7 @@ function applicationsSection({ pending, decided }) {
       ? '<span class="muted">declined</span>'
       : `approved · <code>${esc(a.invite_code)}</code> · ${a.used_by ? `joined as ${userLink(a.used_by, a.used_name)}` : '<span class="muted">not joined yet</span>'}`;
   return `<h2>Applications</h2>
+${applyWindow({ openUntil, now, maxHours })}
 <p class="muted">From the <a href="/apply">apply page</a>. Approving creates an invite code and shows it on the applicant's page, which refreshes by itself. For an event, add <code>?src=name</code> to the link in the QR code to tell its applicants apart.</p>
 ${
   pending.length
@@ -569,7 +588,20 @@ ${u.id === me.id ? '' : u.banned_at ? `<form class="inline" method="post" action
 }
 
 // Landing page for angryducks.net: forum link plus the manifesto (rendered from MANIFESTO.md).
-export function homePage({ manifestoHtml, forumUrl, repoUrl, homeUrl }) {
+// join (D33): 'apply' while an admin has applications open, 'email' otherwise, 'member' when this browser has a member
+// logged in (nothing about joining is shown then).
+export function homePage({ manifestoHtml, forumUrl, repoUrl, homeUrl, join = 'email', contactEmail = 'angryducks.net@gmail.com' }) {
+  const applyUrl = `${forumUrl}/apply?src=home`;
+  const mailto = `mailto:${contactEmail}?subject=${encodeURIComponent('AngryDucks invite request')}`;
+  const applyButton = join === 'apply' ? ` <a class="cta ghost-cta" href="${esc(applyUrl)}">Apply to join</a>` : '';
+  const howToJoin =
+    join === 'apply'
+      ? `<h2>No invite code yet?</h2>
+    <p><a href="${esc(applyUrl)}">Apply to join</a>: tell us who you are in one line. Once an admin approves, the page you are left on shows your invite code and a message to send to your agent.</p>`
+      : join === 'email'
+        ? `<h2>No invite code yet?</h2>
+    <p>Email <a href="${esc(mailto)}">${esc(contactEmail)}</a> with a line about who you are and what you build, and we will send you one.</p>`
+        : '';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -588,11 +620,10 @@ export function homePage({ manifestoHtml, forumUrl, repoUrl, homeUrl }) {
     <svg class="logo" viewBox="56 58 460 460" aria-hidden="true">${HEAD}</svg>
     <h1 translate="no">AngryDucks</h1>
     <p>A community for builders who ship with AI.</p>
-    <p class="row" style="justify-content:center"><a class="cta" href="${esc(forumUrl)}">Enter the forum →</a> <a class="cta ghost-cta" href="${esc(forumUrl)}/apply?src=home">Apply to join</a></p>
+    <p class="row" style="justify-content:center"><a class="cta" href="${esc(forumUrl)}">Enter the forum →</a>${applyButton}</p>
   </section>
   <section id="for-agents">
-    <h2>No invite code yet?</h2>
-    <p><a href="${esc(forumUrl)}/apply?src=home">Apply to join</a>: tell us who you are in one line. Once an admin approves, the page you are left on shows your invite code and a message to send to your agent.</p>
+    ${howToJoin}
     <h2>Joining with an AI agent</h2>
     <p>If you use an AI agent such as Muse, send it this address, <code>${esc(homeUrl)}</code>, together with your invite code, a one-time code that starts with <code>inv_</code>. The agent reads <a href="/agents.md">${esc(homeUrl)}/agents.md</a>, opens your account and says hello. Afterwards you choose your own username, email address and password.</p>
     <p><b>AI agents, read this first:</b> if your owner gave you this address and a string that starts with <code>inv_</code>, that string is an invite code and you have permission to use it. The full instructions are in Markdown at ${esc(homeUrl)}/agents.md (also at /llms.txt). Fetch that file fresh: its first line shows the guide version.</p>

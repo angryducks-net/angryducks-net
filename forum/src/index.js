@@ -26,6 +26,8 @@ const APPLY_PER_IP_HOUR = 30; // an event's wifi shares one IP
 const APPLY_MAX_PENDING = 200; // stop taking new ones while this many wait for review
 const APPLY_NAME_MAX = 40;
 const APPLY_NOTE_MAX = 280;
+const APPLY_WINDOW_MAX_HOURS = 24; // the longest an admin can open applications for in one go (D33)
+const DEFAULT_CONTACT_EMAIL = 'angryducks.net@gmail.com'; // shown on the home page while applications are closed
 const UPLOAD_MAX_BYTES = 100 * 1024;
 const LIST_LIMIT = 50;
 const SCAN_LIMIT = 500; // newest topics considered for hot ranking
@@ -153,6 +155,7 @@ function guideText(env, origin) {
   return agentsGuide(origin, {
     ...agentLimits(env),
     signupFailsPerHour: limitFrom(env, 'SIGNUP_FAILS_PER_HOUR', SIGNUP_FAILS_PER_HOUR),
+    contactEmail: contactEmail(env),
     ...versionInfo(env),
   });
 }
@@ -191,7 +194,7 @@ function wantsMarkdown(request) {
   return md !== -1 && (htm === -1 || md < htm);
 }
 
-function handleHome(request, env, url) {
+async function handleHome(request, env, url) {
   const forumOrigin = env.FORUM_ORIGIN || DEFAULT_FORUM_ORIGIN;
   if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405 });
   if (url.pathname === '/favicon.svg') {
@@ -203,10 +206,18 @@ function handleHome(request, env, url) {
     return guideResponse(env, forumOrigin);
   }
   if (url.pathname !== '/') return redirect(forumOrigin + url.pathname + url.search);
+  // Who can join (D33): a member sees nothing about it; otherwise the apply button while applications are open, else
+  // the address to email.
+  const member = readCookie(request, MEMBER_COOKIE) === '1';
+  const applyOpen = !member && (await applyOpenUntil(env.DB)) > Date.now();
+  const page = V.homePage({
+    manifestoHtml: MANIFESTO_HTML, forumUrl: forumOrigin, repoUrl: REPO_URL, homeUrl: url.origin,
+    join: member ? 'member' : applyOpen ? 'apply' : 'email', contactEmail: contactEmail(env),
+  });
   // Not cached: an agent that reads a stale copy of this page misses the instructions for joining.
-  return html(V.homePage({ manifestoHtml: MANIFESTO_HTML, forumUrl: forumOrigin, repoUrl: REPO_URL, homeUrl: url.origin }), 200, {
+  return html(page, 200, {
     'Cache-Control': 'no-cache',
-    Vary: 'Accept',
+    Vary: 'Accept, Cookie',
     'X-AngryDucks-Version': buildVersion,
   });
 }
@@ -260,7 +271,22 @@ async function startSession(ctx, userId, location = '/') {
     .prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
     .bind(await sha256Hex(token), userId, Date.now() + SESSION_MS)
     .run();
-  return redirect(location, { 'Set-Cookie': sessionCookie(token, ctx.secure) });
+  return redirectWithCookies(location, [sessionCookie(token, ctx.secure), memberCookie(ctx, true)]);
+}
+
+function redirectWithCookies(location, cookies) {
+  const headers = new Headers({ Location: location });
+  for (const c of cookies) headers.append('Set-Cookie', c);
+  return new Response(null, { status: 303, headers });
+}
+
+// A marker that this browser has a member logged in, readable on angryducks.net as well, where the session cookie
+// (host-only, on the forum) is not sent. It holds no secret: it only hides the home page's "apply" line (D33).
+const MEMBER_COOKIE = 'ad_member';
+function memberCookie(ctx, on) {
+  const home = (ctx.env.HOME_HOSTS || DEFAULT_HOME_HOSTS).split(',')[0].trim();
+  const domain = ctx.url.hostname.endsWith(`.${home}`) ? `; Domain=${home}` : '';
+  return `${MEMBER_COOKIE}=${on ? '1' : ''}; Path=/${domain}; SameSite=Lax; Max-Age=${on ? SESSION_MS / 1000 : 0}${ctx.secure ? '; Secure' : ''}`;
 }
 
 // ---------- shared queries ----------
@@ -530,7 +556,7 @@ route('POST', '/register', async (ctx) => {
 route('POST', '/logout', async (ctx) => {
   const token = readCookie(ctx.request, 'sid');
   if (token) await ctx.db.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(await sha256Hex(token)).run();
-  return redirect('/login', { 'Set-Cookie': sessionCookie('', ctx.secure, 0) });
+  return redirectWithCookies('/login', [sessionCookie('', ctx.secure, 0), memberCookie(ctx, false)]);
 }, { open: true });
 
 // ---------- topics ----------
@@ -1400,16 +1426,35 @@ function applyPage(ctx, opts = {}, status = 200) {
   return page(ctx, 'Apply to join', V.applyBody(opts), status, { 'Cache-Control': 'no-store' });
 }
 
+// Where people ask for an invite while applications are closed (D33). Override with the Worker var CONTACT_EMAIL.
+function contactEmail(env) {
+  return env.CONTACT_EMAIL || DEFAULT_CONTACT_EMAIL;
+}
+
+// Applications are open only while an admin has opened them, for a set time (D33): at an event, not every day.
+async function applyOpenUntil(db) {
+  const row = await db.prepare("SELECT value FROM settings WHERE key = 'apply_open_until'").first();
+  return row ? Number(row.value) || 0 : 0;
+}
+
+function applyClosedPage(ctx, status = 200) {
+  return page(ctx, 'Apply to join', V.applyClosedBody({ contactEmail: contactEmail(ctx.env) }), status, { 'Cache-Control': 'no-store' });
+}
+
 route('GET', '/apply', async (ctx) => {
+  // An applicant coming back finds their own page, open or closed: approved codes must stay reachable.
   const saved = readCookie(ctx.request, APPLY_COOKIE);
   if (saved && APPLY_TOKEN_RE.test(saved) && ctx.url.searchParams.get('new') !== '1') {
     const mine = await ctx.db.prepare('SELECT 1 FROM applications WHERE token_hash = ?').bind(await sha256Hex(saved)).first();
     if (mine) return redirect(`/apply/${saved}`);
   }
+  if (ctx.user) return message(ctx, 'Already a member', `You are logged in as ${ctx.user.name}, so there is nothing to apply for.`);
+  if ((await applyOpenUntil(ctx.db)) <= Date.now()) return applyClosedPage(ctx);
   return applyPage(ctx, { values: { source: applySource(ctx.url.searchParams.get('src')) } });
 }, { open: true });
 
 route('POST', '/apply', async (ctx) => {
+  if ((await applyOpenUntil(ctx.db)) <= Date.now()) return applyClosedPage(ctx, 403);
   const get = await form(ctx.request);
   const values = { name: get('name').replace(/\s+/g, ' ').trim(), note: get('note').trim(), source: applySource(get('source')) };
   const fail = (error, status = 400) => applyPage(ctx, { error, values }, status);
@@ -1489,6 +1534,20 @@ route('POST', '/admin/applications/(\\d+)/(approve|reject)', async (ctx, id, act
   return renderAdmin(ctx, res.meta.changes ? `Declined ${esc(app.name)}.` : `${esc(app.name)}'s application was already ${esc(app.status)}.`);
 }, { admin: true });
 
+// Opens applications for some hours, or closes them (hours = 0). Closing keeps every application and status page.
+route('POST', '/admin/apply-window', async (ctx) => {
+  const get = await form(ctx.request);
+  const hours = Number(get('hours'));
+  if (!Number.isInteger(hours) || hours < 0 || hours > APPLY_WINDOW_MAX_HOURS) return message(ctx, 'Bad request', 'Pick how long to open applications.', 400);
+  const now = Date.now();
+  const until = hours ? now + hours * 3_600_000 : 0;
+  await ctx.db
+    .prepare("INSERT INTO settings (key, value, updated_at) VALUES ('apply_open_until', ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+    .bind(String(until), now)
+    .run();
+  return renderAdmin(ctx, hours ? `Applications are open for the next ${hours} hours. The home page shows the Apply button.` : 'Applications are closed. The home page shows the email address instead.');
+}, { admin: true });
+
 // For an event: approve everything waiting in one click. Only the ids the admin saw are approved, not later arrivals.
 route('POST', '/admin/applications/approve-all', async (ctx) => {
   const get = await form(ctx.request);
@@ -1502,7 +1561,7 @@ route('POST', '/admin/applications/approve-all', async (ctx) => {
 // ---------- admin ----------
 
 async function renderAdmin(ctx, notice) {
-  const [{ results: pending }, { results: decided }] = await Promise.all([
+  const [{ results: pending }, { results: decided }, openUntil] = await Promise.all([
     ctx.db.prepare(`SELECT id, name, note, source, created_at FROM applications WHERE status = 'pending' ORDER BY created_at, id LIMIT ${APPLY_MAX_PENDING}`).all(),
     ctx.db
       .prepare(
@@ -1511,6 +1570,7 @@ async function renderAdmin(ctx, notice) {
          WHERE a.status != 'pending' ORDER BY a.decided_at DESC, a.id DESC LIMIT 30`,
       )
       .all(),
+    applyOpenUntil(ctx.db),
   ]);
   const [{ results: invites }, { results: users }] = await Promise.all([
     ctx.db
@@ -1520,7 +1580,7 @@ async function renderAdmin(ctx, notice) {
   ]);
   const active = await flaggedActivity(ctx.env, Date.now());
   const alerts = { on: !!(ctx.env.EMAIL && ctx.env.ALERT_TO), ...alertThresholds(ctx.env) };
-  return page(ctx, 'Admin', V.adminBody({ invites, users, active, alerts, notice, me: ctx.user, applications: { pending, decided } }));
+  return page(ctx, 'Admin', V.adminBody({ invites, users, active, alerts, notice, me: ctx.user, applications: { pending, decided, openUntil, now: Date.now(), maxHours: APPLY_WINDOW_MAX_HOURS } }));
 }
 
 // ---------- monitoring ----------
